@@ -1,0 +1,211 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Markus Zehnder <markus.z@unfoldedcircle.com>
+Date: Thu, 19 Nov 2026 12:00:00 +0100
+Subject: [PATCH] [WPE] Key values for ChannelUp, ChannelDown, MediaPlayPause
+ and Exit
+
+KeyboardEvent.key and keyCode are derived from the keysym alone, and
+four keys of remote controls get no key value of their own:
+
+- KEY_CHANNELUP and KEY_CHANNELDOWN produce the keysyms XF86ChannelUp
+  and XF86ChannelDown (0x10081192 and 0x10081193, _EVDEVK() in
+  XF86keysym.h, XKB_KEY_XF86ChannelUp/Down in xkbcommon). WPEKeysyms.h
+  lacks them because update-keysyms-header skips the _EVDEVK()
+  keysyms, so key is "Unidentified" and keyCode 0.
+- KEY_PLAYPAUSE and KEY_EXIT have no keysyms of their own: the evdev
+  keymap of xkeyboard-config gives them those of KEY_PLAY
+  (XF86AudioPlay) and KEY_CLOSE (XF86Close), so key is "MediaPlay" and
+  "Close".
+
+Map the two channel keysyms to "ChannelUp" and "ChannelDown" with the
+TV key codes VK_CHANNEL_UP (0x1AB) and VK_CHANNEL_DOWN (0x1AC), next to
+the DASE/OCAP/CE-HTML codes the colour keys already use. Tell
+KEY_PLAYPAUSE and KEY_EXIT apart by the hardware keycode (evdev code
++ 8, as keyCodeStringForWPEKeycode() reads it): XF86AudioPlay on keycode
+0xAC is "MediaPlayPause" with VK_MEDIA_PLAY_PAUSE, XF86Close on keycode
+0xB6 is "Exit"; with any other keycode they stay "MediaPlay" and
+"Close". keyValueStringForWPEKeyval() and windowsKeyCodeForWPEKeyval()
+take the keycode for this.
+
+Also map two keysyms an XKB keymap produces that had no key value, as
+Chromium and Firefox do: ISO_Left_Tab (Shift+Tab) to "Tab", and
+XF86Reload (KEY_REFRESH in xkeyboard-config) to "BrowserRefresh" with
+VK_BROWSER_REFRESH.
+
+KeyboardEvent.code does not change: the UI Events code specification
+has no values for the channel, exit and colour keys, so they stay
+"Unidentified".
+
+Upstream: not submitted yet, meant for https://bugs.webkit.org (WPE WebKit)
+Signed-off-by: Markus Zehnder <markus.z@unfoldedcircle.com>
+---
+ Source/WebKit/Shared/WebKeyboardEvent.h       |  4 +-
+ .../WebKit/Shared/wpe/WebEventFactoryWPE.cpp  |  4 +-
+ .../WebKit/Shared/wpe/WebKeyboardEventWPE.cpp | 52 ++++++++++++++++---
+ 3 files changed, 50 insertions(+), 10 deletions(-)
+
+diff --git a/Source/WebKit/Shared/WebKeyboardEvent.h b/Source/WebKit/Shared/WebKeyboardEvent.h
+index 8915f44..09ce820 100644
+--- a/Source/WebKit/Shared/WebKeyboardEvent.h
++++ b/Source/WebKit/Shared/WebKeyboardEvent.h
+@@ -82,10 +82,10 @@ public:
+     static bool NODELETE isKeyboardEventType(WebEventType);
+ 
+ #if PLATFORM(WPE)
+-    static String keyValueStringForWPEKeyval(unsigned);
++    static String keyValueStringForWPEKeyval(unsigned keyval, unsigned keycode);
+     static String keyCodeStringForWPEKeycode(unsigned);
+     static String keyIdentifierForWPEKeyval(unsigned);
+-    static int32_t windowsKeyCodeForWPEKeyval(unsigned);
++    static int32_t windowsKeyCodeForWPEKeyval(unsigned keyval, unsigned keycode);
+     static String singleCharacterStringForWPEKeyval(unsigned);
+ #endif
+ #if PLATFORM(GTK)
+diff --git a/Source/WebKit/Shared/wpe/WebEventFactoryWPE.cpp b/Source/WebKit/Shared/wpe/WebEventFactoryWPE.cpp
+index 0fe8d9a..58d6cc3 100644
+--- a/Source/WebKit/Shared/wpe/WebEventFactoryWPE.cpp
++++ b/Source/WebKit/Shared/wpe/WebEventFactoryWPE.cpp
+@@ -228,10 +228,10 @@ WebKeyboardEvent WebEventFactory::createWebKeyboardEvent(WPEEvent* event, const
+     auto keycode = wpe_event_keyboard_get_keycode(event);
+     return WebKeyboardEvent({ type, modifiersFromWPEModifiers(wpe_event_get_modifiers(event)), monotonicTimeForEvent(event) },
+         text.isNull() ? WebKeyboardEvent::singleCharacterStringForWPEKeyval(keyval) : text,
+-        WebKeyboardEvent::keyValueStringForWPEKeyval(keyval),
++        WebKeyboardEvent::keyValueStringForWPEKeyval(keyval, keycode),
+         WebKeyboardEvent::keyCodeStringForWPEKeycode(keycode),
+         WebKeyboardEvent::keyIdentifierForWPEKeyval(keyval),
+-        WebKeyboardEvent::windowsKeyCodeForWPEKeyval(keyval),
++        WebKeyboardEvent::windowsKeyCodeForWPEKeyval(keyval, keycode),
+         keyval, false, std::nullopt, std::nullopt, isAutoRepeat,
+         keyval >= WPE_KEY_KP_Space && keyval <= WPE_KEY_KP_9);
+ }
+diff --git a/Source/WebKit/Shared/wpe/WebKeyboardEventWPE.cpp b/Source/WebKit/Shared/wpe/WebKeyboardEventWPE.cpp
+index a9005c2..dabb1fe 100644
+--- a/Source/WebKit/Shared/wpe/WebKeyboardEventWPE.cpp
++++ b/Source/WebKit/Shared/wpe/WebKeyboardEventWPE.cpp
+@@ -36,12 +36,39 @@
+ 
+ namespace WebKit {
+ 
++// The keysyms of KEY_CHANNELUP and KEY_CHANNELDOWN: XF86XK_ChannelUp and XF86XK_ChannelDown in XF86keysym.h,
++// XKB_KEY_XF86ChannelUp and XKB_KEY_XF86ChannelDown in xkbcommon. WPEKeysyms.h does not have them because
++// update-keysyms-header skips the keysyms defined with _EVDEVK().
++static constexpr unsigned keyvalChannelUp = 0x10081192;
++static constexpr unsigned keyvalChannelDown = 0x10081193;
++
++// The evdev keymap of xkeyboard-config has no keysyms of their own for KEY_PLAYPAUSE and KEY_EXIT: they produce
++// the keysyms of KEY_PLAY (AudioPlay) and KEY_CLOSE (Close). The hardware keycode (evdev code + 8, as in
++// keyCodeStringForWPEKeycode()) tells them apart.
++static constexpr unsigned keycodePlayPause = 0x00AC;
++static constexpr unsigned keycodeExit = 0x00B6;
++
++static bool isPlayPauseKey(unsigned keyval, unsigned keycode)
++{
++    return keyval == WPE_KEY_AudioPlay && keycode == keycodePlayPause;
++}
++
++static bool isExitKey(unsigned keyval, unsigned keycode)
++{
++    return keyval == WPE_KEY_Close && keycode == keycodeExit;
++}
++
+ // FIXME: This is incomplete. We should change this to mirror
+ // more like what Firefox does, and generate these switch statements
+ // at build time.
+ // https://developer.mozilla.org/en-US/docs/Web/API/KeyboardEvent/key/Key_Values
+-String WebKeyboardEvent::keyValueStringForWPEKeyval(unsigned keyval)
++String WebKeyboardEvent::keyValueStringForWPEKeyval(unsigned keyval, unsigned keycode)
+ {
++    if (isPlayPauseKey(keyval, keycode))
++        return "MediaPlayPause"_s;
++    if (isExitKey(keyval, keycode))
++        return "Exit"_s;
++
+     switch (keyval) {
+     // Modifier keys.
+     case WPE_KEY_Alt_L:
+@@ -89,6 +116,7 @@ String WebKeyboardEvent::keyValueStringForWPEKeyval(unsigned keyval)
+         return "Enter"_s;
+     case WPE_KEY_Tab:
+     case WPE_KEY_KP_Tab:
++    case WPE_KEY_ISO_Left_Tab:
+         return "Tab"_s;
+ 
+     // Navigation keys.
+@@ -319,14 +347,17 @@ String WebKeyboardEvent::keyValueStringForWPEKeyval(unsigned keyval)
+     case WPE_KEY_HomePage:
+         return "BrowserHome"_s;
+     case WPE_KEY_Refresh:
++    case WPE_KEY_Reload:
+         return "BrowserRefresh"_s;
+     case WPE_KEY_Search:
+         return "BrowserSearch"_s;
+     case WPE_KEY_Stop:
+         return "BrowserStop"_s;
+ 
+-    // ChannelDown.
+-    // ChannelUp.
++    case keyvalChannelDown:
++        return "ChannelDown"_s;
++    case keyvalChannelUp:
++        return "ChannelUp"_s;
+     case WPE_KEY_Close:
+         return "Close"_s;
+     case WPE_KEY_MailForward:
+@@ -341,7 +372,7 @@ String WebKeyboardEvent::keyValueStringForWPEKeyval(unsigned keyval)
+         return "MediaPause"_s;
+     case WPE_KEY_AudioPlay:
+         return "MediaPlay"_s;
+-    // MediaPlayPause
++    // MediaPlayPause: see isPlayPauseKey().
+     case WPE_KEY_AudioRecord:
+         return "MediaRecord"_s;
+     case WPE_KEY_AudioRewind:
+@@ -374,6 +405,7 @@ String WebKeyboardEvent::keyValueStringForWPEKeyval(unsigned keyval)
+         return "ColorF3Blue"_s;
+     case WPE_KEY_Display:
+         return "DisplaySwap"_s;
++    // Exit: see isExitKey().
+     case WPE_KEY_Video:
+         return "OnDemand"_s;
+     case WPE_KEY_Subtitle:
+@@ -887,8 +919,11 @@ String WebKeyboardEvent::keyIdentifierForWPEKeyval(unsigned keyval)
+     return makeString("U+"_s, hex(wpe_keyval_to_unicode(keyval), 4));
+ }
+ 
+-int32_t WebKeyboardEvent::windowsKeyCodeForWPEKeyval(unsigned keyval)
++int32_t WebKeyboardEvent::windowsKeyCodeForWPEKeyval(unsigned keyval, unsigned keycode)
+ {
++    if (isPlayPauseKey(keyval, keycode))
++        return VK_MEDIA_PLAY_PAUSE; // (B3) Windows 2000/XP: Play/Pause Media key
++
+     switch (keyval) {
+     case WPE_KEY_Cancel:
+         return 0x03; // (03) The Cancel key
+@@ -1159,6 +1194,7 @@ int32_t WebKeyboardEvent::windowsKeyCodeForWPEKeyval(unsigned keyval)
+     case WPE_KEY_Forward:
+         return VK_BROWSER_FORWARD; // (A7) Windows 2000/XP: Browser Forward key
+     case WPE_KEY_Refresh:
++    case WPE_KEY_Reload:
+         return VK_BROWSER_REFRESH; // (A8) Windows 2000/XP: Browser Refresh key
+     case WPE_KEY_Stop:
+         return VK_BROWSER_STOP; // (A9) Windows 2000/XP: Browser Stop key
+@@ -1180,7 +1216,7 @@ int32_t WebKeyboardEvent::windowsKeyCodeForWPEKeyval(unsigned keyval)
+         return VK_MEDIA_PREV_TRACK; // (B1) Windows 2000/XP: Previous Track key
+     case WPE_KEY_AudioStop:
+         return VK_MEDIA_STOP; // (B2) Windows 2000/XP: Stop Media key
+-        // VK_MEDIA_PLAY_PAUSE (B3) Windows 2000/XP: Play/Pause Media key
++        // VK_MEDIA_PLAY_PAUSE (B3) Windows 2000/XP: Play/Pause Media key, see isPlayPauseKey()
+         // VK_LAUNCH_MAIL (B4) Windows 2000/XP: Start Mail key
+     case WPE_KEY_AudioMedia:
+         return VK_MEDIA_LAUNCH_MEDIA_SELECT; // (B5) Windows 2000/XP: Select Media key
+@@ -1290,6 +1326,10 @@ int32_t WebKeyboardEvent::windowsKeyCodeForWPEKeyval(unsigned keyval)
+         return 0x199; // Toggle power state
+     case WPE_KEY_AudioRecord:
+         return 0x1A0; // Initiate or resume recording of currently selected media
++    case keyvalChannelUp:
++        return 0x1AB; // Select next (numerically or logically) higher channel
++    case keyvalChannelDown:
++        return 0x1AC; // Select next (numerically or logically) lower channel
+     case WPE_KEY_Display:
+         return 0x1BC; // Swap video sources
+     case WPE_KEY_Subtitle:
