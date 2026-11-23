@@ -7,6 +7,8 @@ a patch release changes behaviour without a new export or type.
 
 ## Unreleased
 
+## [0.10.3] - 2026-11-23
+
 ### Fixed
 
 - libucwebview: an https load could fail with TIMEOUT ("Operation was cancelled") a moment after it started when
@@ -80,4 +82,5 @@ version continues the firmware's library releases. API version 1, 51 exported fu
 - libucwebview: `uc_webview_global_set_cookies()` no longer does pointer arithmetic on a NULL cookie value before
   refusing it (undefined behaviour that clang's UBSan reports; the result was correct). No ABI change.
 
+[0.10.3]: https://github.com/unfoldedcircle/ucwebview/releases/tag/v0.10.3
 [0.10.2]: https://github.com/unfoldedcircle/ucwebview/releases/tag/v0.10.2
