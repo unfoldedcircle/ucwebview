@@ -28,6 +28,7 @@ endif()
 
 target_sources(flutterpi_module PRIVATE
   ${UC_WEBVIEW_PLUGIN_DIR}/core/ucfl_codec.c
+  ${UC_WEBVIEW_PLUGIN_DIR}/core/ucfl_dump.c
   ${UC_WEBVIEW_PLUGIN_DIR}/core/ucfl_loader.c
   ${UC_WEBVIEW_PLUGIN_DIR}/core/ucfl_protocol.c
   ${UC_WEBVIEW_PLUGIN_DIR}/core/ucfl_views.c

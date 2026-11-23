@@ -27,6 +27,12 @@
  *   3. dropped (by the engine after the next fetch, or unfetched by flutter-pi) -> "released" note ->
  *      uc_webview_frame_release() and glDeleteTextures() on the platform thread in a context of the plugin's own
  *      (shared with flutter-pi's root context), made current only for that.
+ *
+ * Frame dumps (README.md, "Frame dumps"; UC_WEBVIEW_DUMP_DIR): on the platform thread, never the raster thread. The
+ * newest frame of a view (view->latest) stays valid until its "released" note is handled there, which is only after
+ * the engine fetched a newer one, so the trigger file works for a page that renders nothing new as well. A DMA-BUF
+ * frame is read back in the plugin's own context: its EGLImage bound to a new texture as resolve_frame() binds it,
+ * attached to a temporary framebuffer, glReadPixels(); the engine's context and its GL state are not touched.
  */
 #include <errno.h>
 #include <pthread.h>
@@ -38,6 +44,7 @@
 
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/timerfd.h>
 
 #include "flutter-pi.h"
 #include "gl_renderer.h"
@@ -46,6 +53,7 @@
 #include "texture_registry.h"
 
 #include "ucfl_codec.h"
+#include "ucfl_dump.h"
 #include "ucfl_loader.h"
 #include "ucfl_protocol.h"
 #include "ucfl_views.h"
@@ -70,6 +78,7 @@ struct view {
     struct texture *texture;
     int frame_width, frame_height; /* of the last frame event */
     bool frame_zero_copy, had_frame;
+    struct frame *latest; /* the newest frame pushed, NULL once released: what a frame dump writes */
 };
 
 struct frame {
@@ -104,6 +113,12 @@ struct plugin {
     sd_event_source *done_source;
 
     uint64_t frames_ready, frames_fetched, frames_released;
+
+    /* frame dumps (UC_WEBVIEW_DUMP_DIR), platform thread */
+    struct ucfl_dump dump;
+    int dump_fd; /* timerfd of the trigger's polls, -1 without */
+    sd_event_source *dump_source;
+    PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC image_target_renderbuffer;
 };
 
 /* One instance: frames can outlive the plugin's deinit (the engine drops its last texture frame after it). */
@@ -266,6 +281,31 @@ static void on_unresolved_frame_destroy(void *userdata)
 
 /* ---- platform thread: frames done ---------------------------------------- */
 
+/* the EGL context current on the calling thread, to go back to */
+struct egl_current {
+    EGLDisplay display;
+    EGLContext context;
+    EGLSurface draw, read;
+};
+
+static struct egl_current get_current(void)
+{
+    return (struct egl_current) {
+        .display = eglGetCurrentDisplay(),
+        .context = eglGetCurrentContext(),
+        .draw = eglGetCurrentSurface(EGL_DRAW),
+        .read = eglGetCurrentSurface(EGL_READ),
+    };
+}
+
+static void restore_current(struct plugin *p, const struct egl_current *previous)
+{
+    if (previous->context != EGL_NO_CONTEXT)
+        eglMakeCurrent(previous->display, previous->draw, previous->read, previous->context);
+    else
+        eglMakeCurrent(p->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+}
+
 static bool make_own_context_current(struct plugin *p)
 {
     if (p->egl_context == EGL_NO_CONTEXT) {
@@ -283,9 +323,7 @@ static int on_done(sd_event_source *source, int fd, uint32_t revents, void *user
     struct plugin *p = userdata;
     struct done *list, *fifo = NULL;
     uint64_t count;
-    EGLDisplay previous_display = eglGetCurrentDisplay();
-    EGLContext previous_context = eglGetCurrentContext();
-    EGLSurface previous_draw = eglGetCurrentSurface(EGL_DRAW), previous_read = eglGetCurrentSurface(EGL_READ);
+    struct egl_current previous = get_current();
     bool switched = false, current = false;
 
     (void) source;
@@ -316,6 +354,8 @@ static int on_done(sd_event_source *source, int fd, uint32_t revents, void *user
             frame->rendered = true;
             continue;
         }
+        if (view->latest == frame)
+            view->latest = NULL;
         if (view->wv)
             p->lib.frame_release(view->wv, frame->f.handle);
         if (frame->texture) {
@@ -331,14 +371,213 @@ static int on_done(sd_event_source *source, int fd, uint32_t revents, void *user
         free(frame);
     }
 
-    if (switched) {
-        if (previous_context != EGL_NO_CONTEXT)
-            eglMakeCurrent(previous_display, previous_draw, previous_read, previous_context);
-        else
-            eglMakeCurrent(p->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-    }
+    if (switched)
+        restore_current(p, &previous);
     ucfp_glib_loop_rearm(p->glib);
     return 0;
+}
+
+/* ---- platform thread: frame dumps ------------------------------------------ */
+
+static void clear_gl_errors(void)
+{
+    for (int i = 0; i < 8 && glGetError() != GL_NO_ERROR; i++) {
+        /* bounded: a context that is lost reports errors forever */
+    }
+}
+
+/*
+ * The pixels of a DMA-BUF frame as R, G, B, A bytes, width * 4 per row, the buffer's first row first; NULL after a
+ * log line. In the plugin's own context: the EGLImage bound to a new GL_TEXTURE_2D texture as resolve_frame() binds
+ * it, attached to a temporary framebuffer. A driver that has the image only as an external texture, which GLES 2
+ * cannot attach to a framebuffer, gets it as a renderbuffer (GL_OES_EGL_image). The framebuffer, texture and
+ * renderbuffer bindings and the pack alignment are restored, so this would work in any context.
+ *
+ * Row order: glReadPixels() returns the rows from framebuffer y = 0 up, and y of a texture attachment is the texel
+ * row t, so the first row read is texel row 0, the buffer's first row in memory. That is the top row as the frame is
+ * shown: the engine wraps external textures with kTopLeft_GrSurfaceOrigin (flutter engine,
+ * shell/platform/embedder/embedder_external_texture_gl.cc, ResolveTextureSkia()), and WebKit's DMA-BUF frames have
+ * their first row at the top, as a Wayland buffer. So the rows are not flipped: a frame that is upside down in the
+ * file is upside down in the buffer.
+ */
+static uint8_t *read_frame_pixels(struct plugin *p, const uc_webview_frame *f, const char **how)
+{
+    struct egl_current previous = get_current();
+    GLint previous_framebuffer = 0, previous_texture = 0, previous_renderbuffer = 0, previous_pack = 4;
+    GLuint framebuffer = 0, texture = 0, renderbuffer = 0;
+    GLenum status, error;
+    uint8_t *pixels = NULL;
+
+    if (!make_own_context_current(p)) {
+        LOG("frame dump: no GL context of the plugin's own");
+        restore_current(p, &previous);
+        return NULL;
+    }
+    clear_gl_errors();
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &previous_framebuffer);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &previous_texture);
+    glGetIntegerv(GL_RENDERBUFFER_BINDING, &previous_renderbuffer);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &previous_pack);
+
+    glGenFramebuffers(1, &framebuffer);
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    texture = new_texture(GL_TEXTURE_2D);
+    p->image_target_texture(GL_TEXTURE_2D, (GLeglImageOES) f->egl_image);
+    *how = "a GL texture";
+    status = GL_FRAMEBUFFER_UNSUPPORTED;
+    if (glGetError() == GL_NO_ERROR) {
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+        status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    }
+    if (status != GL_FRAMEBUFFER_COMPLETE && p->image_target_renderbuffer) {
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+        clear_gl_errors();
+        glGenRenderbuffers(1, &renderbuffer);
+        glBindRenderbuffer(GL_RENDERBUFFER, renderbuffer);
+        p->image_target_renderbuffer(GL_RENDERBUFFER, (GLeglImageOES) f->egl_image);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, renderbuffer);
+        status = glGetError() == GL_NO_ERROR ? glCheckFramebufferStatus(GL_FRAMEBUFFER) : GL_FRAMEBUFFER_UNSUPPORTED;
+        *how = "a GL renderbuffer";
+    }
+
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        LOG("frame dump: the frame's EGLImage cannot be read through a framebuffer (status 0x%x)", (unsigned) status);
+    } else if (!(pixels = malloc((size_t) f->width * 4 * (size_t) f->height))) {
+        LOG("frame dump: out of memory");
+    } else {
+        glPixelStorei(GL_PACK_ALIGNMENT, 4);
+        glReadPixels(0, 0, f->width, f->height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        if ((error = glGetError()) != GL_NO_ERROR) {
+            LOG("frame dump: glReadPixels failed (0x%x)", (unsigned) error);
+            free(pixels);
+            pixels = NULL;
+        }
+    }
+
+    glPixelStorei(GL_PACK_ALIGNMENT, previous_pack);
+    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint) previous_framebuffer);
+    glBindTexture(GL_TEXTURE_2D, (GLuint) previous_texture);
+    glBindRenderbuffer(GL_RENDERBUFFER, (GLuint) previous_renderbuffer);
+    glDeleteFramebuffers(1, &framebuffer);
+    glDeleteTextures(1, &texture);
+    if (renderbuffer)
+        glDeleteRenderbuffers(1, &renderbuffer);
+    restore_current(p, &previous);
+    return pixels;
+}
+
+/* Platform thread: writes frame as the next frame-<n>.ppm of the dump directory. */
+static void dump_frame(struct plugin *p, const struct view *view, const struct frame *frame)
+{
+    const uc_webview_frame *f = &frame->f;
+    char path[UCFL_DUMP_PATH_MAX], source[96];
+    char fourcc[5] = { (char) (f->fourcc & 0xff), (char) ((f->fourcc >> 8) & 0xff), (char) ((f->fourcc >> 16) & 0xff),
+                       (char) (f->fourcc >> 24), '\0' };
+    uint8_t *pixels = NULL;
+    const char *how = "";
+    int err;
+
+    if (f->egl_image) {
+        pixels = read_frame_pixels(p, f, &how);
+        if (!pixels)
+            return;
+        ucfl_dump_next_path(&p->dump, path, sizeof(path));
+        err = ucfl_write_ppm(path, pixels, f->width, f->height, (size_t) f->width * 4, UCFL_PIXELS_RGBA, false);
+        snprintf(source, sizeof(source), "DMA-BUF %s modifier 0x%llx, read as %s", fourcc,
+                 (unsigned long long) f->modifier, how);
+    } else if (f->pixels) {
+        /* ARGB8888 little endian, top row first (uc_webview.h, uc_webview_frame) */
+        ucfl_dump_next_path(&p->dump, path, sizeof(path));
+        err = ucfl_write_ppm(path, f->pixels, f->width, f->height, (size_t) f->stride, UCFL_PIXELS_BGRA, false);
+        snprintf(source, sizeof(source), "shared memory %s", fourcc);
+    } else {
+        return;
+    }
+    free(pixels);
+    if (err)
+        LOG("frame dump to %s failed: %s", path, strerror(err));
+    else
+        LOG("frame dumped: %s %dx%d (view %lld, %s)", path, f->width, f->height, (long long) view->id, source);
+}
+
+static int on_dump_timer(sd_event_source *source, int fd, uint32_t revents, void *userdata)
+{
+    struct plugin *p = userdata;
+    uint64_t expirations;
+    int error, dumped = 0;
+
+    (void) revents;
+    if (read(fd, &expirations, sizeof(expirations)) < 0 && errno != EAGAIN)
+        LOG("frame dumps: reading the timer failed: %s", strerror(errno));
+    if (!ucfl_dump_triggered(&p->dump, &error)) {
+        if (error) {
+            LOG("frame dumps: %s/" UCFL_DUMP_TRIGGER " cannot be deleted (%s): the trigger is off", p->dump.dir,
+                strerror(error));
+            sd_event_source_set_enabled(source, SD_EVENT_OFF);
+        }
+        return 0;
+    }
+    for (size_t i = 0; i < p->views.count; i++) {
+        struct view *view = p->views.slots[i].data;
+
+        if (view->wv && view->latest) {
+            dump_frame(p, view, view->latest);
+            dumped++;
+        }
+    }
+    if (!dumped)
+        LOG("frame dump: no view has a frame");
+    return 0;
+}
+
+/* Platform thread, plugin_init(): dumps on when UC_WEBVIEW_DUMP_DIR is set. */
+static void start_dumps(struct plugin *p)
+{
+    const char *dir = getenv("UC_WEBVIEW_DUMP_DIR");
+    const long interval_ns = UCFL_DUMP_POLL_MS * 1000000L;
+    const struct itimerspec every = { .it_interval = { 0, interval_ns }, .it_value = { 0, interval_ns } };
+    int err;
+
+    p->dump_fd = -1;
+    err = ucfl_dump_init(&p->dump, dir);
+    if (!ucfl_dump_on(&p->dump)) {
+        if (err)
+            LOG("frame dumps off: UC_WEBVIEW_DUMP_DIR: %s", strerror(err));
+        return;
+    }
+    if (err)
+        LOG("frame dumps: creating %s failed: %s", p->dump.dir, strerror(err));
+    if (p->renderer)
+        p->image_target_renderbuffer = (PFNGLEGLIMAGETARGETRENDERBUFFERSTORAGEOESPROC) gl_renderer_get_proc_address(
+            p->renderer, "glEGLImageTargetRenderbufferStorageOES");
+
+    p->dump_fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+    if (p->dump_fd < 0 || timerfd_settime(p->dump_fd, 0, &every, NULL) != 0)
+        err = errno;
+    else
+        err = flutterpi_sd_event_add_io(&p->dump_source, p->dump_fd, EPOLLIN, on_dump_timer, p);
+    if (err) {
+        LOG("frame dumps: no timer for the trigger (%s): only the first frame is dumped", strerror(err));
+        if (p->dump_fd >= 0)
+            close(p->dump_fd);
+        p->dump_fd = -1;
+        p->dump_source = NULL;
+        return;
+    }
+    LOG("frame dumps to %s: the first frame, and the newest frame of each view after `touch %s/" UCFL_DUMP_TRIGGER "`",
+        p->dump.dir, p->dump.dir);
+}
+
+static void stop_dumps(struct plugin *p)
+{
+    if (p->dump_source) {
+        sd_event_source_set_enabled(p->dump_source, SD_EVENT_OFF);
+        sd_event_source_unref(p->dump_source);
+        p->dump_source = NULL;
+    }
+    if (p->dump_fd >= 0)
+        close(p->dump_fd);
+    p->dump_fd = -1;
 }
 
 /* ---- platform thread: the library's callbacks (from the GLib dispatch) ----- */
@@ -382,7 +621,11 @@ static void on_frame_ready(uc_webview *wv, const uc_webview_frame *f, void *user
         p->lib.frame_release(wv, f->handle);
         view_unref(view);
         free(frame);
+        return;
     }
+    view->latest = frame;
+    if (ucfl_dump_first(&p->dump))
+        dump_frame(p, view, frame);
 }
 
 static void on_load_changed(uc_webview *wv, int event, const char *uri, void *user)
@@ -665,6 +908,7 @@ static enum plugin_init_result plugin_init(struct flutterpi *flutterpi, void **u
     p->flutterpi = flutterpi;
     p->egl_display = EGL_NO_DISPLAY;
     p->egl_context = EGL_NO_CONTEXT;
+    p->dump_fd = -1;
     ucfl_views_init(&p->views);
     pthread_mutex_init(&p->done_lock, NULL);
     p->done_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
@@ -682,10 +926,12 @@ static enum plugin_init_result plugin_init(struct flutterpi *flutterpi, void **u
             (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC) gl_renderer_get_proc_address(p->renderer, "glEGLImageTargetTexture2DOES");
         p->has_bgra = gl_renderer_supports_gl_extension(p->renderer, "GL_EXT_texture_format_BGRA8888");
     }
+    start_dumps(p);
 
     if (plugin_registry_set_receiver_v2_locked(registry, UCFL_CHANNEL_CONTROL, on_control_message, p) != 0 ||
         plugin_registry_set_receiver_v2_locked(registry, UCFL_CHANNEL_EVENTS, on_events_message, p) != 0) {
         plugin_registry_remove_receiver_v2_locked(registry, UCFL_CHANNEL_CONTROL);
+        stop_dumps(p);
         sd_event_source_unref(p->done_source);
         close(p->done_fd);
         return PLUGIN_INIT_RESULT_ERROR;
@@ -714,6 +960,7 @@ static void plugin_deinit(struct flutterpi *flutterpi, void *userdata)
             (unsigned long long) p->frames_fetched, (unsigned long long) p->frames_released);
     ucfp_glib_loop_destroy(p->glib);
     p->glib = NULL;
+    stop_dumps(p);
 
     /* frames the engine still holds post to a closed list from now on (the instance stays, see plugin_instance) */
     sd_event_source_set_enabled(p->done_source, SD_EVENT_OFF);

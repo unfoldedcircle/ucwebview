@@ -13,7 +13,7 @@ scroll, text input, dialogs and authentication requests, site settings, device s
 
 | Path | What |
 |---|---|
-| `core/` | Host-neutral C, no flutter-pi or GLib types: the dlopen loader with optional symbols (`ucfl_loader`), the view table (`ucfl_views`), Flutter's StandardMessageCodec at byte level (`ucfl_codec`) and the channel protocol (`ucfl_protocol`). A later GTK runner plugin for the Linux desktop shares it. |
+| `core/` | Host-neutral C, no flutter-pi or GLib types: the dlopen loader with optional symbols (`ucfl_loader`), the view table (`ucfl_views`), Flutter's StandardMessageCodec at byte level (`ucfl_codec`), the channel protocol (`ucfl_protocol`) and the files of the frame dumps (`ucfl_dump`). A later GTK runner plugin for the Linux desktop shares it. |
 | `flutterpi/` | The flutter-pi adapter: registration (`FLUTTERPI_PLUGIN`), channels, frames to textures (`uc_webview_plugin.c`), and GLib's main context on flutter-pi's event loop (`ucfp_glib_loop.c`). |
 | `uc_webview.cmake` | Adds the sources to flutter-pi's `flutterpi_module`; included by flutter-pi's `CMakeLists.txt` when `BUILD_UC_WEBVIEW_PLUGIN` is on. |
 | `patches/` | The patch to flutter-pi that adds that option (default off), made against flutter-pi `8b86c52`. |
@@ -109,13 +109,55 @@ The library (`libucwebview.so.1`) and WPE WebKit are run time dependencies of th
 - The refresh rate of the display (`create`'s `refreshRate`, from `FlutterView.display.refreshRate`) is passed to
   the library before the first page load of the process.
 - Log lines start with `[uc_webview]`; they never contain URLs.
+- `UC_WEBVIEW_DUMP_DIR=<dir>`: frame dumps, see below.
+
+## Frame dumps
+
+A test aid to check the orientation and the colours of the web frames on a device without anyone looking at its
+screen. It shows the frame as the library hands it over, independent of Flutter's scene (a screenshot the app takes
+of itself shows what Flutter draws, the texture included).
+
+With `UC_WEBVIEW_DUMP_DIR=<dir>` in flutter-pi's environment:
+
+- The directory is created (one level, mode 0700: frames show page content) when it is missing.
+- The first frame of the process is written right away: `<dir>/frame-1.ppm`.
+- `touch <dir>/dump` writes the newest frame of each view as the next `<dir>/frame-<n>.ppm` within 500 ms and
+  deletes the trigger file. This works for a page that renders nothing new: the newest frame is kept until the next
+  one has been shown. `n` counts from 1 per run, so a new run overwrites the files of the previous one.
+- Each file is logged: `[uc_webview] frame dumped: <dir>/frame-<n>.ppm <width>x<height> (view <id>, <source>)`, the
+  source being `DMA-BUF <fourcc> modifier <modifier>, read as a GL texture` (or `renderbuffer`) or
+  `shared memory AR24`. A file appears complete or not at all (written to `.tmp`, then renamed).
+
+The files are binary PPM (P6, 8 bits per channel, no alpha): no library needed on the device. The first row of the
+file is the first row of the buffer, which is the top row as the frame is shown (Flutter's external textures have a
+top-left origin, and WebKit's frames have their first row at the top): **a page that is upside down in the file is
+upside down in the buffer**, and one that is upright in the file but not on the screen is turned by what draws it.
+DMA-BUF frames are read through OpenGL ES (the frame's EGLImage bound to a texture, as for drawing, attached to a
+framebuffer, `glReadPixels()` as RGBA), so the colours are those the GPU samples with the format the frame was
+imported with; shared memory frames are taken from their pixels.
+
+The dump runs on the platform thread in a GL context of the plugin's own, not on the raster thread and not in the
+engine's context; it blocks the platform thread for the read-back and the file write (not measured on a device yet).
+With the variable set, the platform thread wakes every 500 ms to look for the trigger; without it nothing changes.
+
+Pull and view the files on a computer:
+
+```shell
+scp root@<device>:<dir>/frame-1.ppm .
+convert frame-1.ppm frame-1.png        # ImageMagick
+python3 -c 'from PIL import Image; Image.open("frame-1.ppm").save("frame-1.png")'
+```
+
+The directory must be the same file system for the shell that touches the trigger and for flutter-pi: a service
+with `PrivateTmp=` has a `/tmp` of its own, and a sandbox that makes the file system read-only needs the directory
+in its writable paths.
 
 ## Tests
 
 On a Linux host with GLib and libsystemd development files:
 
 ```shell
-make -C flutter-pi check          # codec, protocol, loader (against fake libraries), view table, GLib loop
+make -C flutter-pi check          # codec, protocol, loader (against fake libraries), view table, dump files, GLib loop
 make -C flutter-pi check-asan     # the same with AddressSanitizer and UBSan
 make -C flutter-pi flutter-pi-build FLUTTER_PI_SRC=<flutter-pi checkout at 8b86c52>
 ```

@@ -23,9 +23,10 @@ SD_CFLAGS   = $(shell $(PKG_CONFIG) --cflags libsystemd)
 SD_LIBS     = $(shell $(PKG_CONFIG) --libs libsystemd)
 ASAN_FLAGS  = -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all -g
 
-CORE_HDRS = core/ucfl_codec.h core/ucfl_protocol.h core/ucfl_loader.h core/ucfl_views.h ../lib/uc_webview.h
+CORE_HDRS = core/ucfl_codec.h core/ucfl_protocol.h core/ucfl_loader.h core/ucfl_views.h core/ucfl_dump.h \
+            ../lib/uc_webview.h
 FAKES     = tests/fake-ok.so tests/fake-old.so tests/fake-abi2.so tests/fake-incomplete.so
-TESTS     = tests/test-codec tests/test-protocol tests/test-loader tests/test-views tests/test-glib-loop
+TESTS     = tests/test-codec tests/test-protocol tests/test-loader tests/test-views tests/test-dump tests/test-glib-loop
 
 FLUTTER_PI_SRC   ?=
 FLUTTER_PI_BUILD ?= $(CURDIR)/.cache/flutter-pi-build
@@ -44,6 +45,9 @@ tests/test-loader: tests/test-loader.c core/ucfl_loader.c $(CORE_HDRS) $(FAKES)
 
 tests/test-views: tests/test-views.c core/ucfl_views.c core/ucfl_views.h
 	$(CC) $(ALL_CFLAGS) $(GLIB_CFLAGS) -o $@ tests/test-views.c core/ucfl_views.c $(LDFLAGS) $(GLIB_LIBS)
+
+tests/test-dump: tests/test-dump.c core/ucfl_dump.c core/ucfl_dump.h
+	$(CC) $(ALL_CFLAGS) $(GLIB_CFLAGS) -o $@ tests/test-dump.c core/ucfl_dump.c $(LDFLAGS) $(GLIB_LIBS)
 
 tests/test-glib-loop: tests/test-glib-loop.c flutterpi/ucfp_glib_loop.c flutterpi/ucfp_glib_loop.h
 	$(CC) $(ALL_CFLAGS) $(GLIB_CFLAGS) $(SD_CFLAGS) -o $@ tests/test-glib-loop.c flutterpi/ucfp_glib_loop.c $(LDFLAGS) \
@@ -71,9 +75,12 @@ check-asan: $(FAKES)
 	    core/ucfl_protocol.c core/ucfl_codec.c $(LDFLAGS) $(GLIB_LIBS) -lm
 	$(CC) $(ALL_CFLAGS) $(ASAN_FLAGS) $(GLIB_CFLAGS) -o tests/test-loader-asan tests/test-loader.c core/ucfl_loader.c \
 	    $(LDFLAGS) $(GLIB_LIBS) -ldl
+	$(CC) $(ALL_CFLAGS) $(ASAN_FLAGS) $(GLIB_CFLAGS) -o tests/test-dump-asan tests/test-dump.c core/ucfl_dump.c \
+	    $(LDFLAGS) $(GLIB_LIBS)
 	$(CC) $(ALL_CFLAGS) $(ASAN_FLAGS) $(GLIB_CFLAGS) $(SD_CFLAGS) -o tests/test-glib-loop-asan tests/test-glib-loop.c \
 	    flutterpi/ucfp_glib_loop.c $(LDFLAGS) $(GLIB_LIBS) $(SD_LIBS)
-	@for t in tests/test-codec-asan tests/test-protocol-asan tests/test-loader-asan tests/test-glib-loop-asan; do \
+	@for t in tests/test-codec-asan tests/test-protocol-asan tests/test-loader-asan tests/test-dump-asan \
+	    tests/test-glib-loop-asan; do \
 	    echo "== $$t"; ./$$t || exit 1; done
 
 flutter-pi-build:
