@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Unfolded Circle ApS
+prefix=@PREFIX@
+libdir=@LIBDIR@
+includedir=@INCLUDEDIR@
+
+Name: ucwebview
+Description: In-process WPE WebKit web view with a plain C ABI (dlopen libucwebview.so.1)
+Version: @VERSION@
+Libs: -L${libdir} -lucwebview
+Cflags: -I${includedir}/ucwebview
