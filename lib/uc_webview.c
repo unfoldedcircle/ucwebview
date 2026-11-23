@@ -863,13 +863,30 @@ uc_webview_internal_render_buffer (uc_webview *wv, WPEBuffer *buffer, GError **e
              * take a reference as the shared-memory path does (without it every frame dropped the buffer's own
              * reference: a GLib-CRITICAL per frame and a crash in free() after the next process swap). */
             GBytes *pixels = wpe_buffer_import_to_pixels (buffer, error);
+            gsize size = 0;
+            int stride;
+
             if (pixels == NULL) {
                 frame_free (frame);
                 return FALSE;
             }
+            /* The rows are the mapping's in WPE WebKit 2.54.2 and unpadded (width * 4) since 2.54.3, neither
+             * necessarily the plane's stride (wpe_buffer_dma_buf_get_stride(), which up to 0.10.2 went here): the
+             * GBytes is height whole rows in both, so its size gives the stride (library 0.10.3, uc_formats.h). */
+            frame->info.pixels = g_bytes_get_data (pixels, &size);
+            stride = uc_formats_pixels_stride (size, frame->info.width, frame->info.height);
+            if (stride < 0) {
+                g_set_error (error, WPE_VIEW_ERROR, WPE_VIEW_ERROR_RENDER_FAILED,
+                             "the pixels of a %dx%d frame are %" G_GSIZE_FORMAT " bytes, not whole rows of at least "
+                             "%d bytes", frame->info.width, frame->info.height, size, frame->info.width * 4);
+                g_warning ("ucwebview: cannot hand over a %dx%d %s frame: %" G_GSIZE_FORMAT " bytes of pixels",
+                           frame->info.width, frame->info.height, uc_fourcc_to_string (frame->info.fourcc, fourcc),
+                           size);
+                frame_free (frame);
+                return FALSE;
+            }
             frame->pixels = g_bytes_ref (pixels);
-            frame->info.pixels = g_bytes_get_data (frame->pixels, NULL);
-            frame->info.stride = (int) wpe_buffer_dma_buf_get_stride (dmabuf, 0);
+            frame->info.stride = stride;
         }
     } else if (WPE_IS_BUFFER_SHM (buffer)) {
         WPEBufferSHM *shm = WPE_BUFFER_SHM (buffer);

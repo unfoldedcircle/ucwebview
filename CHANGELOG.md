@@ -18,6 +18,11 @@ a patch release changes behaviour without a new export or type.
   load. A server that never answers still fails with TIMEOUT after 10 s. No ABI change.
 - libucwebview: a load the library repeats (a certificate exception accepted the certificate, or the case above) no
   longer replaces a navigation the host started in the meantime, for example from its FINISHED callback.
+- libucwebview: without a host EGLDisplay, DMA-BUF frames handed over as `pixels` have the stride of the pixels WebKit
+  returns. WPE WebKit 2.54.3 returns rows without padding, and the library passed the padded stride of the buffer's
+  plane: for every width whose rows are padded a sheared picture, and a host that read `height` rows of that stride
+  read past the end of the pixels. The stride now comes from the size of the pixels, right with 2.54.2 (the mapping's
+  rows) and 2.54.3; a frame whose size is not whole rows is dropped with a warning. No ABI change.
 
 ### Added
 

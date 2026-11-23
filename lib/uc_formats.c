@@ -92,3 +92,19 @@ uc_fourcc_to_string (guint32 fourcc, char buf[5])
     buf[4] = '\0';
     return buf;
 }
+
+int
+uc_formats_pixels_stride (gsize size, int width, int height)
+{
+    gsize row, stride;
+
+    if (width <= 0 || height <= 0 || (gsize) width > G_MAXSIZE / 4)
+        return -1;
+    row = (gsize) width * 4;
+    if (size % (gsize) height != 0)
+        return -1;
+    stride = size / (gsize) height;
+    if (stride < row || stride > G_MAXINT)
+        return -1;
+    return (int) stride;
+}

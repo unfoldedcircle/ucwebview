@@ -161,10 +161,20 @@ calls from other threads with a `g_critical`.
 4. `uc_webview_frame_release(handle)` → `wpe_view_buffer_released()` → `ReleaseBuffer` to the web process
    (`AcceleratedBackingStore.cpp:312-319`), then the library drops its reference. Keep at most two frames.
 
-Shared memory frames (`WPEBufferSHM`, `AcceleratedBackingStore.cpp:153-171`) are handed over as `pixels`. Without a
-host EGLDisplay (`uc_webview_global_init()` with `NULL`) a DMA-BUF frame is mapped with
-`wpe_buffer_import_to_pixels()` and handed over as `pixels` too; that `GBytes` is owned by the buffer (transfer none,
-`WPEBuffer.cpp:282-291`), so the library takes its own reference (since 0.6.5).
+Shared memory frames (`WPEBufferSHM`, `AcceleratedBackingStore.cpp:153-171`) are handed over as `pixels`. Without a host
+EGLDisplay (`uc_webview_global_init()` with `NULL`) a DMA-BUF frame is mapped with `wpe_buffer_import_to_pixels()` and
+handed over as `pixels` too; that `GBytes` is owned by the buffer (transfer none, `WPEBuffer.cpp:282-291`), so the
+library takes its own reference (since 0.6.5). Its rows changed in WPE WebKit 2.54.3: up to 2.54.2 the `GBytes` is the
+`gbm_bo_map()` mapping, `height` rows of the map's stride (`WPEBufferDMABuf.cpp:264-283` in 2.54.2), since 2.54.3 the
+rows are not padded, `width * 4` bytes, and a mapping with another stride is copied row by row
+(`WPEBufferDMABuf.cpp:273-283`, `wpeBufferCopyPixelsWithoutRowPadding()` in `WPEBuffer.cpp:285-296`, and the function's
+documentation, "The rows of the returned data are not padded"). Up to 0.10.2 the library passed the stride of the
+buffer's first plane (`wpe_buffer_dma_buf_get_stride()`), which is wrong with 2.54.3 for every width whose plane rows
+are padded (a sheared picture, and a host that reads `height` rows of that stride reads past the end of the pixels), and
+with 2.54.2 whenever the driver maps through a copy with another stride. Since 0.10.3 `stride` is the size of the
+`GBytes` divided by `height`, which is right for both without a version check; a size that is not `height` rows of at
+least `width * 4` bytes drops the frame with a warning (`uc_formats_pixels_stride()`, unit-tested in
+`tests/test-formats.c`). Hosts always use `stride`, never `width * 4`.
 
 ### Frame pacing and the display refresh rate
 

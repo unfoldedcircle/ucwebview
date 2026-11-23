@@ -41,6 +41,21 @@ typedef struct {
 GArray *uc_formats_select (const UcFormatEntry *input, guint n_input);
 void    uc_formats_free   (GArray *formats);
 
+/*
+ * The row stride of the pixels wpe_buffer_import_to_pixels() returned for a DMA-BUF buffer of width x height (4 bytes
+ * per pixel, the only formats it maps are ARGB8888 and XRGB8888), from the size of the GBytes (library 0.10.3). The
+ * GBytes is height whole rows in every release, but the rows changed:
+ *  - WPE WebKit 2.54.2 and older: the gbm_bo_map() mapping itself, height rows of the map's stride
+ *    (WPEBufferDMABuf.cpp:264-283 in 2.54.2). That stride is the mapping's, which need not be the plane's
+ *    (wpe_buffer_dma_buf_get_stride()): a driver may map a tiled or compressed buffer through a linear copy.
+ *  - 2.54.3: rows without padding, width * 4 bytes; a mapping with another stride is copied row by row
+ *    (WPEBufferDMABuf.cpp:265-296, wpeBufferCopyPixelsWithoutRowPadding() in WPEBuffer.cpp:285-296, and the
+ *    function's documentation, WPEBuffer.cpp:298-309, "The rows of the returned data are not padded").
+ * The size tells both apart without the WebKit version. -1 when it is not height rows of at least width * 4 bytes
+ * (or the stride does not fit an int): the frame cannot be described.
+ */
+int uc_formats_pixels_stride (gsize size, int width, int height);
+
 /* "AR24" style string for logging; buf must hold 5 bytes. Non-printable bytes become '?'. */
 const char *uc_fourcc_to_string (guint32 fourcc, char buf[5]);
 
