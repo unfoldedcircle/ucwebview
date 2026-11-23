@@ -7,12 +7,7 @@ a patch release changes behaviour without a new export or type.
 
 ## Unreleased
 
-### Fixed
-
-- libucwebview: `uc_webview_global_set_cookies()` no longer does pointer arithmetic on a NULL cookie value before
-  refusing it (undefined behaviour that clang's UBSan reports; the result was correct). No ABI change.
-
-## [0.10.1]
+## [0.10.2] - 2026-11-23
 
 First public release. The library and the launcher have shipped in the firmware of the Remote Two and Remote 3; the
 version continues the firmware's library releases. API version 1, 51 exported functions,
@@ -57,4 +52,9 @@ version continues the firmware's library releases. API version 1, 51 exported fu
   process crash or a failed load; D-Bus control interface `org.unfoldedcircle.WebKiosk` (`Open`, `Reload`, `GetUri`,
   `Quit`); `--headless` smoke test on WPE's headless platform.
 
-[0.10.1]: https://github.com/unfoldedcircle/ucwebview/releases/tag/v0.10.1
+### Fixed since the firmware's 0.10.1
+
+- libucwebview: `uc_webview_global_set_cookies()` no longer does pointer arithmetic on a NULL cookie value before
+  refusing it (undefined behaviour that clang's UBSan reports; the result was correct). No ABI change.
+
+[0.10.2]: https://github.com/unfoldedcircle/ucwebview/releases/tag/v0.10.2
