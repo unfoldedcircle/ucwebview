@@ -50,7 +50,7 @@ syntax-check: wpe-headers
 lint:
 	./scripts/check-spdx.sh
 	./scripts/check-whitespace.sh
-	$(SHELLCHECK) scripts/*.sh
+	$(SHELLCHECK) scripts/*.sh flutter-pi/scripts/*.sh
 
 install:
 	$(MAKE) -C lib install

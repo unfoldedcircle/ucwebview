@@ -11,6 +11,8 @@ Unfolded Circle Remote Two and Remote 3:
   self-checking test modes, and the unit tests.
 - **[launcher/](launcher/README.md): wpe-launcher**, a fullscreen kiosk browser on WPEPlatform's DRM platform
   (`WPE_PLATFORM=drm`) without a compositor, with a small D-Bus control interface.
+- **[flutter-pi/](flutter-pi/README.md): a flutter-pi plugin** (spike) that shows the library's web views as Flutter
+  textures, driven over a `MethodChannel` and an `EventChannel`; built into flutter-pi, the library `dlopen()`ed.
 
 The library is `dlopen()`ed by the web view of [remote-ui](https://github.com/unfoldedcircle/remote-ui), the Qt user
 interface of the remotes, which keeps a copy of `uc_webview.h`. What a web page sees of the remote (the device state
@@ -79,6 +81,7 @@ make syntax-check     # fetches the WPE WebKit 2.54.2 release tarball once (SHA-
                       # headers and compiles every WPE source of lib/ and launcher/ against them (-fsyntax-only), a
                       # negative probe that must fail, and the screen glue against a fake WPEScreen
 make lint             # SPDX headers, white space, shellcheck
+make -C flutter-pi check   # the flutter-pi plugin's host tests (GLib and libsystemd), see flutter-pi/README.md
 ```
 
 With WPE WebKit (CI level 2, in a disposable container: it installs into the container's `/usr`):
@@ -150,6 +153,7 @@ complete Qt Quick host.
 |------|---------|
 | `lib/` | libucwebview, its web process extension, `uc_webview.h`, `ucwebview-test`, `tests/` (unit tests, the WPE header generator, the WebKitGTK harness) |
 | `launcher/` | wpe-launcher and its tests |
+| `flutter-pi/` | the flutter-pi plugin: a host-neutral C core (loader, codec, protocol), the flutter-pi adapter, the CMake option patch, host tests |
 | `scripts/` | the WPE header download, the lints, the distribution build of CI level 2 |
 | `webkit-patches/` | an optional patch for WPE WebKit (key values of remote control keys), see its [README](webkit-patches/README.md) |
 | `docs/` | [CI level 2](docs/ci-level-2.md) |
