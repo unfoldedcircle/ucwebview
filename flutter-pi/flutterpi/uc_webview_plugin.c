@@ -692,7 +692,8 @@ static bool ensure_initialized(struct plugin *p, double refresh_rate)
     if (p->initialized)
         return true;
     if (!p->glib) {
-        p->glib = ucfp_glib_loop_new(flutterpi_sd_event_add_io, p->reason, sizeof(p->reason));
+        p->glib = ucfp_glib_loop_new(flutterpi_sd_event_add_io, flutterpi_post_platform_task, p->reason,
+                                     sizeof(p->reason));
         if (!p->glib)
             return false;
     }
@@ -803,6 +804,7 @@ static void handle_stats(struct plugin *p, struct ucfl_writer *w)
         { "glibMaxDispatchUs", (int64_t) glib.max_dispatch_us },
         { "glibTotalDispatchUs", (int64_t) glib.total_dispatch_us },
         { "glibSlowDispatches", (int64_t) glib.slow_dispatches },
+        { "glibEpollRebuilds", (int64_t) glib.epoll_rebuilds },
     };
     ucfl_put_stats_reply(w, stats, sizeof(stats) / sizeof(stats[0]));
 }
@@ -954,9 +956,11 @@ static void plugin_deinit(struct flutterpi *flutterpi, void *userdata)
 
     ucfp_glib_loop_get_stats(p->glib, &glib);
     if (glib.dispatches)
-        LOG("GLib dispatches: %llu, longest %llu us, %llu longer than %u us, frames %llu ready, %llu fetched, %llu released",
+        LOG("GLib dispatches: %llu, longest %llu us, %llu longer than %u us, %llu epoll sets renewed, frames %llu ready, "
+            "%llu fetched, %llu released",
             (unsigned long long) glib.dispatches, (unsigned long long) glib.max_dispatch_us,
-            (unsigned long long) glib.slow_dispatches, UCFP_GLIB_SLOW_US, (unsigned long long) p->frames_ready,
+            (unsigned long long) glib.slow_dispatches, UCFP_GLIB_SLOW_US, (unsigned long long) glib.epoll_rebuilds,
+            (unsigned long long) p->frames_ready,
             (unsigned long long) p->frames_fetched, (unsigned long long) p->frames_released);
     ucfp_glib_loop_destroy(p->glib);
     p->glib = NULL;

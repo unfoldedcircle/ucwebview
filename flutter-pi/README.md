@@ -44,9 +44,13 @@ with `Texture(textureId: id)`.
 
 **Threads.** Every libucwebview call and callback runs on flutter-pi's platform thread, which must therefore
 iterate GLib's default main context (`uc_webview.h`, "Threading contract"). flutter-pi runs an sd_event loop there;
-`ucfp_glib_loop.c` drives GLib's context from it as an external main loop: the context is acquired once, the fds of
-each `g_main_context_query()` go into one epoll set with a timerfd for the query's timeout, and that epoll fd is the
-only sd_event source (`flutterpi_sd_event_add_io()`). The longest check and dispatch is logged
+`ucfp_glib_loop.c` drives GLib's context from it as an external main loop: the context is acquired once, and each
+GLib iteration runs as one platform task (`flutterpi_post_platform_task()`), first-in first-out with flutter-pi's own
+tasks, the begin-frame of each vsync included, so a busy page and flutter-pi take turns and neither starves the other
+or input. While GLib has nothing ready, the fds of its last `g_main_context_query()` wait in one epoll set with a
+timerfd for the query's timeout, an sd_event io source (`flutterpi_sd_event_add_io()`) that posts the next iteration.
+An fd closed while its file lives on elsewhere (a rendering fence) leaves an epoll entry that cannot be removed by its
+number: the set is then replaced by a new one (`glibEpollRebuilds` in `stats`). The longest check and dispatch is logged
 (`[uc_webview] longest GLib dispatch so far: ...`) and reported by `stats`: the platform thread holds flutter-pi's
 event loop lock while it dispatches, so a dispatch longer than a frame delays vsync replies and platform messages.
 An idle web view costs no wake-ups.

@@ -18,11 +18,15 @@
 
 #include <glib.h>
 
+struct ucfp_glib_task;
+
 struct ucfp_glib_loop {
     GMainContext *context;
+    ucfp_post_task_fn post_task;
     int epoll_fd;
     int timer_fd;
-    sd_event_source *source;
+    sd_event_source *source; /* the epoll fd in sd_event: on while waiting, off while a task is posted */
+    struct ucfp_glib_task *task; /* the posted iteration, NULL when none is */
 
     GPollFD *fds; /* the fds of the last query, n_fds of capacity */
     int n_fds;
@@ -30,11 +34,20 @@ struct ucfp_glib_loop {
     GPollFD *registered; /* the fds in the epoll set, n_registered of registered_capacity */
     int n_registered;
     int registered_capacity;
+    bool must_rebuild; /* a new epoll set could not be made: the old one may hold stale entries */
     int max_priority;
     bool dispatching;
     bool warned_epoll;
+    bool warned_rebuild;
+    bool warned_post;
 
     struct ucfp_glib_stats stats;
+};
+
+/* A posted iteration; ucfp_glib_loop_destroy() clears loop when flutter-pi has not run it yet (a platform task cannot
+ * be taken back). */
+struct ucfp_glib_task {
+    struct ucfp_glib_loop *loop;
 };
 
 static uint64_t now_us(void)
@@ -58,33 +71,88 @@ static const GPollFD *find_fd(const GPollFD *fds, int n, int fd)
     return NULL;
 }
 
-/* Makes the epoll set hold exactly the fds of the last query, and arms the timer for its timeout. */
-static void update(struct ucfp_glib_loop *loop, int timeout_ms)
+static void warn_unwatchable(struct ucfp_glib_loop *loop, int fd)
 {
-    bool always_ready = false;
+    /* a file epoll cannot watch (EPERM: a regular file) is always ready for poll() */
+    if (!loop->warned_epoll) {
+        fprintf(stderr, "[uc_webview] GLib polls fd %d, which epoll refuses (%s); it is polled every turn\n", fd,
+                strerror(errno));
+        loop->warned_epoll = true;
+    }
+}
 
-    /* fds of the previous query that are gone (EBADF or ENOENT when GLib closed them already: ignored) */
-    for (int i = 0; i < loop->n_registered; i++) {
-        if (!find_fd(loop->fds, loop->n_fds, loop->registered[i].fd))
-            epoll_ctl(loop->epoll_fd, EPOLL_CTL_DEL, loop->registered[i].fd, NULL);
+/* Replaces the epoll set by an empty one with just the timer: the only way to drop an entry whose fd is closed while
+ * its file lives on (ucfp_glib_loop.h, "Stale epoll entries"). false when it could not be made: the old set stays. */
+static bool new_epoll_set(struct ucfp_glib_loop *loop)
+{
+    struct epoll_event ev = { .events = EPOLLIN, .data.fd = loop->timer_fd };
+    int fd = epoll_create1(EPOLL_CLOEXEC);
+    int r;
+
+    if (fd < 0 || epoll_ctl(fd, EPOLL_CTL_ADD, loop->timer_fd, &ev) != 0) {
+        r = -errno;
+    } else {
+        r = sd_event_source_set_io_fd(loop->source, fd);
     }
-    /* Every fd again, also one with the same number and events as before: GLib may have closed it and got the number
-     * back for another file, which epoll does not know (it keys its entries by file and fd number; the closed file
-     * left the set with its last fd). MOD fails with ENOENT for such an fd, which is then added. */
-    for (int i = 0; i < loop->n_fds; i++) {
-        struct epoll_event ev = { .events = epoll_events(loop->fds[i].events), .data.fd = loop->fds[i].fd };
-        if (epoll_ctl(loop->epoll_fd, EPOLL_CTL_MOD, loop->fds[i].fd, &ev) == 0)
-            continue;
-        if (errno == ENOENT && epoll_ctl(loop->epoll_fd, EPOLL_CTL_ADD, loop->fds[i].fd, &ev) == 0)
-            continue;
-        /* a file epoll cannot watch (EPERM: a regular file) is always ready for poll() */
-        if (!loop->warned_epoll) {
-            fprintf(stderr, "[uc_webview] GLib polls fd %d, which epoll refuses (%s); it is polled at once\n",
-                    loop->fds[i].fd, strerror(errno));
-            loop->warned_epoll = true;
+    if (r < 0) {
+        if (!loop->warned_rebuild) {
+            fprintf(stderr, "[uc_webview] a new epoll set for GLib's fds failed: %s\n", strerror(-r));
+            loop->warned_rebuild = true;
         }
-        always_ready = true;
+        if (fd >= 0)
+            close(fd);
+        return false;
     }
+    close(loop->epoll_fd);
+    loop->epoll_fd = fd;
+    loop->stats.epoll_rebuilds++;
+    return true;
+}
+
+/* Makes the epoll set hold exactly the fds of the last query, and arms the timer for its timeout. false when an fd
+ * cannot be watched by epoll, or the set could not be renewed: the caller polls in turns instead. */
+static bool update(struct ucfp_glib_loop *loop, int timeout_ms)
+{
+    bool rebuild = loop->must_rebuild;
+    bool watchable = true;
+
+    /* Incrementally while every epoll_ctl() succeeds. A DEL of a number that left the query fails when the fd was
+     * closed (EBADF) or the number belongs to another file now (ENOENT): if the closed file lives on in another
+     * process or fd, its entry is still in the set and only a new set gets rid of it. A MOD of a number that stayed
+     * fails alike when GLib closed it and got the number back for another file. A new number is added. */
+    for (int i = 0; i < loop->n_registered && !rebuild; i++) {
+        if (!find_fd(loop->fds, loop->n_fds, loop->registered[i].fd) &&
+            epoll_ctl(loop->epoll_fd, EPOLL_CTL_DEL, loop->registered[i].fd, NULL) != 0)
+            rebuild = true;
+    }
+    for (int i = 0; i < loop->n_fds && !rebuild; i++) {
+        struct epoll_event ev = { .events = epoll_events(loop->fds[i].events), .data.fd = loop->fds[i].fd };
+        if (find_fd(loop->registered, loop->n_registered, loop->fds[i].fd)) {
+            if (epoll_ctl(loop->epoll_fd, EPOLL_CTL_MOD, loop->fds[i].fd, &ev) != 0)
+                rebuild = true;
+        } else if (epoll_ctl(loop->epoll_fd, EPOLL_CTL_ADD, loop->fds[i].fd, &ev) != 0) {
+            if (errno == EPERM) {
+                warn_unwatchable(loop, loop->fds[i].fd);
+                watchable = false;
+            } else {
+                rebuild = true;
+            }
+        }
+    }
+    if (rebuild) {
+        watchable = true;
+        loop->must_rebuild = !new_epoll_set(loop);
+        if (loop->must_rebuild)
+            watchable = false;
+        for (int i = 0; i < loop->n_fds && !loop->must_rebuild; i++) {
+            struct epoll_event ev = { .events = epoll_events(loop->fds[i].events), .data.fd = loop->fds[i].fd };
+            if (epoll_ctl(loop->epoll_fd, EPOLL_CTL_ADD, loop->fds[i].fd, &ev) != 0) {
+                warn_unwatchable(loop, loop->fds[i].fd);
+                watchable = false;
+            }
+        }
+    }
+
     if (loop->registered_capacity < loop->n_fds) {
         loop->registered = g_renew(GPollFD, loop->registered, loop->n_fds);
         loop->registered_capacity = loop->n_fds;
@@ -93,21 +161,53 @@ static void update(struct ucfp_glib_loop *loop, int timeout_ms)
         memcpy(loop->registered, loop->fds, (size_t) loop->n_fds * sizeof(GPollFD));
     loop->n_registered = loop->n_fds;
 
-    /* timeout < 0: no timer; 0: a source is ready, come back after the other events of this sd_event iteration */
+    /* timeout < 0: no timer (0 does not get here: a source is ready) */
     struct itimerspec spec = { 0 };
-    if (timeout_ms == 0 || always_ready) {
-        spec.it_value.tv_nsec = 1;
-    } else if (timeout_ms > 0) {
+    if (timeout_ms > 0) {
         spec.it_value.tv_sec = timeout_ms / 1000;
         spec.it_value.tv_nsec = (long) (timeout_ms % 1000) * 1000000L;
     }
     timerfd_settime(loop->timer_fd, 0, &spec, NULL);
+    return watchable;
 }
 
+static int run_task(void *userdata);
+
+/* Posts the next iteration as a platform task, with the io source off until it ran. false when posting failed: the
+ * io source is then on with an expired timer, and on_ready() iterates by itself. */
+static bool schedule(struct ucfp_glib_loop *loop)
+{
+    struct ucfp_glib_task *task;
+    int err;
+
+    if (loop->task)
+        return true;
+    sd_event_source_set_enabled(loop->source, SD_EVENT_OFF);
+    task = g_new(struct ucfp_glib_task, 1);
+    task->loop = loop;
+    err = loop->post_task(run_task, task);
+    if (err == 0) {
+        loop->task = task;
+        return true;
+    }
+    g_free(task);
+    if (!loop->warned_post) {
+        fprintf(stderr, "[uc_webview] posting a GLib iteration failed: %s\n", strerror(err));
+        loop->warned_post = true;
+    }
+    struct itimerspec spec = { .it_value.tv_nsec = 1 };
+    timerfd_settime(loop->timer_fd, 0, &spec, NULL);
+    sd_event_source_set_enabled(loop->source, SD_EVENT_ON);
+    return false;
+}
+
+/* Prepares and queries the context: a ready one gets the next turn (a posted task), an idle one waits for its fds and
+ * its timeout in the epoll set. */
 static void prepare_and_arm(struct ucfp_glib_loop *loop)
 {
     int timeout_ms = -1;
     int n;
+    bool ready;
 
     g_main_context_prepare(loop->context, &loop->max_priority);
     while ((n = g_main_context_query(loop->context, loop->max_priority, &timeout_ms, loop->fds, loop->capacity)) >
@@ -116,20 +216,24 @@ static void prepare_and_arm(struct ucfp_glib_loop *loop)
         loop->capacity = n;
     }
     loop->n_fds = n;
-    update(loop, timeout_ms);
+
+    ready = timeout_ms == 0;
+    if (!ready && loop->n_fds) {
+        for (int i = 0; i < loop->n_fds; i++)
+            loop->fds[i].revents = 0;
+        ready = g_poll(loop->fds, (guint) loop->n_fds, 0) > 0;
+    }
+    if (!ready && update(loop, timeout_ms)) {
+        sd_event_source_set_enabled(loop->source, SD_EVENT_ON);
+        return;
+    }
+    schedule(loop);
 }
 
-static int on_ready(sd_event_source *source, int fd, uint32_t revents, void *userdata)
+/* One GLib iteration: the fds' revents (timeout 0), check, dispatch, and the next prepare/query. */
+static void iterate(struct ucfp_glib_loop *loop)
 {
-    struct ucfp_glib_loop *loop = userdata;
-    uint64_t expirations, start, elapsed;
-
-    (void) source;
-    (void) fd;
-    (void) revents;
-
-    if (read(loop->timer_fd, &expirations, sizeof(expirations)) < 0 && errno != EAGAIN)
-        fprintf(stderr, "[uc_webview] reading the GLib timer failed: %s\n", strerror(errno));
+    uint64_t start, elapsed;
 
     for (int i = 0; i < loop->n_fds; i++)
         loop->fds[i].revents = 0;
@@ -155,15 +259,46 @@ static int on_ready(sd_event_source *source, int fd, uint32_t revents, void *use
     }
 
     prepare_and_arm(loop);
+}
+
+static int run_task(void *userdata)
+{
+    struct ucfp_glib_task *task = userdata;
+    struct ucfp_glib_loop *loop = task->loop;
+
+    g_free(task);
+    if (loop) {
+        loop->task = NULL;
+        iterate(loop);
+    }
     return 0;
 }
 
-struct ucfp_glib_loop *ucfp_glib_loop_new(ucfp_add_io_fn add_io, char *reason, size_t reason_size)
+/* The epoll set is readable: a GLib fd or the timer. */
+static int on_ready(sd_event_source *source, int fd, uint32_t revents, void *userdata)
+{
+    struct ucfp_glib_loop *loop = userdata;
+    uint64_t expirations;
+
+    (void) source;
+    (void) fd;
+    (void) revents;
+
+    if (read(loop->timer_fd, &expirations, sizeof(expirations)) < 0 && errno != EAGAIN)
+        fprintf(stderr, "[uc_webview] reading the GLib timer failed: %s\n", strerror(errno));
+    if (!schedule(loop))
+        iterate(loop);
+    return 0;
+}
+
+struct ucfp_glib_loop *ucfp_glib_loop_new(ucfp_add_io_fn add_io, ucfp_post_task_fn post_task, char *reason,
+                                          size_t reason_size)
 {
     struct ucfp_glib_loop *loop = g_new0(struct ucfp_glib_loop, 1);
     struct epoll_event ev = { .events = EPOLLIN };
     int err;
 
+    loop->post_task = post_task;
     loop->epoll_fd = -1;
     loop->timer_fd = -1;
     loop->context = g_main_context_default();
@@ -203,6 +338,8 @@ void ucfp_glib_loop_destroy(struct ucfp_glib_loop *loop)
 {
     if (!loop)
         return;
+    if (loop->task)
+        loop->task->loop = NULL;
     sd_event_source_set_enabled(loop->source, SD_EVENT_OFF);
     sd_event_source_unref(loop->source);
     close(loop->epoll_fd);
@@ -215,7 +352,7 @@ void ucfp_glib_loop_destroy(struct ucfp_glib_loop *loop)
 
 void ucfp_glib_loop_rearm(struct ucfp_glib_loop *loop)
 {
-    if (loop && !loop->dispatching)
+    if (loop && !loop->dispatching && !loop->task)
         prepare_and_arm(loop);
 }
 
