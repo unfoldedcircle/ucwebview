@@ -184,8 +184,10 @@ static void
 on_load_changed (WebKitWebView *web_view, WebKitLoadEvent event, gpointer user_data)
 {
     uc_webview *wv = user_data;
-    if (event == WEBKIT_LOAD_STARTED)
+    if (event == WEBKIT_LOAD_STARTED) {
         wv->tls_failure_errors = 0;
+        uc_site_wk_navigation (web_view, TRUE);
+    }
     uc_page_wk_load_changed (wv->page, event);
     if (event == WEBKIT_LOAD_COMMITTED && wv->rendered != NULL)
         uc_rendered_cancel_all (wv->rendered, "navigation");
@@ -205,10 +207,12 @@ on_load_failed (WebKitWebView *web_view, WebKitLoadEvent event, const char *fail
     char *loggable;
     char *message;
 
-    (void) web_view; (void) event;
     wv->tls_failure_errors = 0;
     if (g_error_matches (error, WEBKIT_NETWORK_ERROR, WEBKIT_NETWORK_ERROR_CANCELLED) || refused)
         return FALSE;
+    /* a load on the connection of a preconnect that failed on the certificate: loaded again (0.10.3) */
+    if (uc_site_wk_load_cancelled (web_view, event, failing_uri, error, global.log_full_urls))
+        return TRUE;
     uc_load_failure_from_error (&failure, error, tls_errors);
     loggable = uc_uri_policy_loggable (failing_uri, global.log_full_urls);
     message = uc_uri_policy_scrub_text (failure.message, global.log_full_urls);
@@ -674,6 +678,7 @@ uc_webview_load_uri (uc_webview *wv, const char *uri)
         return;
     }
     uc_wk_requests_host_navigation (wv->requests, TRUE);
+    uc_site_wk_navigation (wv->web_view, FALSE);
     webkit_web_view_load_uri (wv->web_view, uri);
 }
 
@@ -684,6 +689,7 @@ uc_webview_load_html (uc_webview *wv, const char *html, const char *base_uri)
     if (html == NULL)
         return;
     uc_wk_requests_host_navigation (wv->requests, TRUE);
+    uc_site_wk_navigation (wv->web_view, FALSE);
     webkit_web_view_load_html (wv->web_view, html, base_uri);
 }
 
@@ -692,6 +698,7 @@ uc_webview_reload (uc_webview *wv)
 {
     CHECK_VIEW (wv);
     uc_wk_requests_host_navigation (wv->requests, TRUE);
+    uc_site_wk_navigation (wv->web_view, FALSE);
     webkit_web_view_reload (wv->web_view);
 }
 
@@ -700,6 +707,7 @@ uc_webview_stop (uc_webview *wv)
 {
     CHECK_VIEW (wv);
     uc_wk_requests_host_navigation (wv->requests, FALSE);
+    uc_site_wk_navigation (wv->web_view, FALSE);
     webkit_web_view_stop_loading (wv->web_view);
 }
 
@@ -710,6 +718,7 @@ uc_webview_go_back (uc_webview *wv)
     if (!webkit_web_view_can_go_back (wv->web_view))
         return;
     uc_wk_requests_host_navigation (wv->requests, TRUE);
+    uc_site_wk_navigation (wv->web_view, FALSE);
     webkit_web_view_go_back (wv->web_view);
 }
 
@@ -720,6 +729,7 @@ uc_webview_go_forward (uc_webview *wv)
     if (!webkit_web_view_can_go_forward (wv->web_view))
         return;
     uc_wk_requests_host_navigation (wv->requests, TRUE);
+    uc_site_wk_navigation (wv->web_view, FALSE);
     webkit_web_view_go_forward (wv->web_view);
 }
 

@@ -6,6 +6,7 @@
  */
 #include "uc_site_wk.h"
 
+#include "uc_load_error.h"
 #include "uc_uri_policy.h"
 
 #include <libsoup/soup.h>
@@ -246,23 +247,120 @@ tls_retry_free (gpointer data)
     g_free (retry);
 }
 
+/* ---- loads the library repeats ------------------------------------------------------------------------- */
+
+/* Per web view (object data): the navigations since the view was created, for the loads the library repeats from an
+ * idle (library 0.10.3: a navigation that comes first wins), the time of the last STARTED and the loop guard of the
+ * repeated cancelled loads (uc_load_error.h). */
+#define LOADS_KEY "ucwebview-loads"
+
+typedef struct {
+    guint navigation;
+    gint64 started_us;      /* g_get_monotonic_time() of the last STARTED, 0 before the first */
+    UcLoadRetries cancelled;
+} Loads;
+
+static void
+loads_free (gpointer data)
+{
+    Loads *loads = data;
+    uc_load_retries_clear (&loads->cancelled);
+    g_free (loads);
+}
+
+static Loads *
+loads_of (WebKitWebView *web_view)
+{
+    Loads *loads = g_object_get_data (G_OBJECT (web_view), LOADS_KEY);
+
+    if (loads == NULL) {
+        loads = g_new0 (Loads, 1);
+        g_object_set_data_full (G_OBJECT (web_view), LOADS_KEY, loads, loads_free);
+    }
+    return loads;
+}
+
+void
+uc_site_wk_navigation (WebKitWebView *web_view, gboolean started)
+{
+    Loads *loads = loads_of (web_view);
+
+    loads->navigation++;
+    if (started)
+        loads->started_us = g_get_monotonic_time ();
+}
+
 typedef struct {
     WebKitWebView *web_view;
     char *uri;
-} TlsReload;
+    char *loggable;
+    guint navigation;
+} Reload;
 
 static gboolean
-tls_reload (gpointer data)
+reload_idle (gpointer data)
 {
-    TlsReload *reload = data;
+    Reload *reload = data;
 
     /* the owner clears "ucwebview" in uc_webview_free(): a freed view loads nothing */
-    if (g_object_get_data (G_OBJECT (reload->web_view), "ucwebview") != NULL)
+    if (g_object_get_data (G_OBJECT (reload->web_view), "ucwebview") == NULL) {
+        /* nothing */
+    } else if (loads_of (reload->web_view)->navigation != reload->navigation) {
+        /* the host navigated, or another load started, after the failure (from its FINISHED callback, say): that
+         * navigation stays (library 0.10.3; before, the repeated load replaced it) */
+        g_message ("ucwebview: %s: not loaded again, another navigation came first", reload->loggable);
+    } else {
         webkit_web_view_load_uri (reload->web_view, reload->uri);
+    }
     g_object_unref (reload->web_view);
     g_free (reload->uri);
+    g_free (reload->loggable);
     g_free (reload);
     return G_SOURCE_REMOVE;
+}
+
+/* Not inside the signal: WebKit emits FINISHED of the failed load after it (WebKitWebView.cpp:2774-2801), the new
+ * load starts after that, from an idle. */
+static void
+reload_later (WebKitWebView *web_view, const char *uri, const char *loggable)
+{
+    Reload *reload = g_new0 (Reload, 1);
+
+    reload->web_view = g_object_ref (web_view);
+    reload->uri = g_strdup (uri);
+    reload->loggable = g_strdup (loggable);
+    reload->navigation = loads_of (web_view)->navigation;
+    g_idle_add_full (G_PRIORITY_DEFAULT, reload_idle, reload, NULL);
+}
+
+gboolean
+uc_site_wk_load_cancelled (WebKitWebView *web_view, WebKitLoadEvent event, const char *failing_uri,
+                           const GError *error, gboolean log_full_urls)
+{
+    Loads *loads = loads_of (web_view);
+    gint64 now = g_get_monotonic_time ();
+    gint64 since = loads->started_us > 0 ? now - loads->started_us : -1;
+    char *loggable;
+    gboolean again;
+
+    if (error == NULL
+        || !uc_load_error_cancelled_early (failing_uri, g_quark_to_string (error->domain), error->code,
+                                           event == WEBKIT_LOAD_STARTED, since))
+        return FALSE;
+    loggable = uc_uri_policy_loggable (failing_uri, log_full_urls);
+    again = uc_load_retries_take (&loads->cancelled, failing_uri, now);
+    if (again) {
+        g_message ("ucwebview: %s: load cancelled %" G_GINT64_FORMAT " ms after it started, on the connection of "
+                   "WebKit's preconnect, which had failed on the server's certificate; loading again", loggable,
+                   since / 1000);
+        reload_later (web_view, failing_uri, loggable);
+    } else {
+        g_message ("ucwebview: %s: load cancelled %" G_GINT64_FORMAT " ms after it started, again after %d repeated "
+                   "loads within %d s; not loading it again", loggable, since / 1000, UC_LOAD_RETRIES_MAX,
+                   (int) (UC_LOAD_RETRIES_WINDOW_US / G_USEC_PER_SEC));
+    }
+    g_free (loggable);
+    return again;
 }
 
 char *
@@ -307,8 +405,6 @@ uc_site_wk_tls_error (WebKitWebView *web_view, const char *failing_uri, GTlsCert
         g_warning ("ucwebview: %s: the TLS certificate of %s failed again after its exception was applied (errors "
                    "0x%x, SHA-256 %s)", loggable, host, (unsigned) errors, sha256 != NULL ? sha256 : "unknown");
     } else {
-        TlsReload *reload = g_new0 (TlsReload, 1);
-
         g_message ("ucwebview: %s: the TLS certificate of %s is not valid (errors 0x%x), accepted by %s; loading "
                    "again", loggable, host, (unsigned) errors,
                    any ? "the exception for any certificate of the host" : "the exception for its SHA-256 fingerprint");
@@ -325,11 +421,7 @@ uc_site_wk_tls_error (WebKitWebView *web_view, const char *failing_uri, GTlsCert
             retry->attempts = 1;
             g_object_set_data_full (G_OBJECT (web_view), "ucwebview-tls-retry", retry, tls_retry_free);
         }
-        /* not inside the signal: WebKit emits FINISHED of the failed load after it
-         * (WebKitWebView.cpp:2783-2799), the new load starts after that */
-        reload->web_view = g_object_ref (web_view);
-        reload->uri = g_strdup (failing_uri);
-        g_idle_add_full (G_PRIORITY_DEFAULT, tls_reload, reload, NULL);
+        reload_later (web_view, failing_uri, loggable);
         handled = TRUE;
     }
     g_free (loggable);

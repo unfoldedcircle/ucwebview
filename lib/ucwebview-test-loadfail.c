@@ -24,6 +24,7 @@
 static gboolean opt_load_fail_test;
 static char *opt_load_fail_tls_cert;
 static char *opt_load_fail_steps;
+static int opt_load_fail_tls_hosts = -1;
 
 const GOptionEntry load_fail_test_entries[] = {
     { "load-fail-test", 0, 0, G_OPTION_ARG_NONE, &opt_load_fail_test,
@@ -35,12 +36,19 @@ const GOptionEntry load_fail_test_entries[] = {
       "certificate steps of --load-fail-test", "FILE" },
     { "load-fail-steps", 0, 0, G_OPTION_ARG_STRING, &opt_load_fail_steps,
       "The --load-fail-test steps, comma separated (default: all): dns, refused, unreachable, timeout, tls, scheme, "
-      "cancelled, attachment, http-error, old-host", "LIST" },
+      "cancelled, attachment, http-error, old-host, tls-race", "LIST" },
+    { "load-fail-tls-hosts", 0, 0, G_OPTION_ARG_INT, &opt_load_fail_tls_hosts,
+      "Loads of the tls-race step (default 24, 2 to 48): HTTPS loads of new hosts 127.0.1.1, 127.0.1.2, ... whose "
+      "certificate WebKit has not seen, half of them with an exception, timed against WebKit's preconnect (library "
+      "0.10.3)", "N" },
     { NULL }
 };
 
 static const char *const all_steps[] = { "dns", "refused", "unreachable", "timeout", "tls", "scheme", "cancelled",
-                                         "attachment", "http-error", "old-host" };
+                                         "attachment", "http-error", "old-host", "tls-race" };
+
+#define TLS_RACE_HOSTS_DEFAULT 24
+#define TLS_RACE_HOSTS_MAX     48
 
 gboolean
 load_fail_test_mode (void)
@@ -52,11 +60,18 @@ gboolean
 load_fail_test_check_options (void)
 {
     if (!opt_load_fail_test) {
-        if (opt_load_fail_tls_cert != NULL || opt_load_fail_steps != NULL) {
-            g_printerr ("ucwebview-test: --load-fail-tls-cert and --load-fail-steps go with --load-fail-test\n");
+        if (opt_load_fail_tls_cert != NULL || opt_load_fail_steps != NULL || opt_load_fail_tls_hosts != -1) {
+            g_printerr ("ucwebview-test: --load-fail-tls-cert, --load-fail-steps and --load-fail-tls-hosts go with "
+                        "--load-fail-test\n");
             return FALSE;
         }
         return TRUE;
+    }
+    if (opt_load_fail_tls_hosts == -1) {
+        opt_load_fail_tls_hosts = TLS_RACE_HOSTS_DEFAULT;
+    } else if (opt_load_fail_tls_hosts < 2 || opt_load_fail_tls_hosts > TLS_RACE_HOSTS_MAX) {
+        g_printerr ("ucwebview-test: --load-fail-tls-hosts takes 2 to %d\n", TLS_RACE_HOSTS_MAX);
+        return FALSE;
     }
     if (opt_load_fail_steps != NULL) {
         char **names = g_strsplit (opt_load_fail_steps, ",", -1);
@@ -121,6 +136,9 @@ static struct {
     char *site;             /* http://127.0.0.1:P */
     char *tls_site;         /* https://127.0.0.1:Q, NULL without --load-fail-tls-cert */
     char *tls_cert_sha256;
+    guint16 race_ports[TLS_RACE_HOSTS_MAX];       /* the HTTPS listeners of 127.0.1.1, 127.0.1.2, ... (tls-race) */
+    guint16 race_http_ports[TLS_RACE_HOSTS_MAX];  /* and the HTTP ones */
+    guint n_race;
     SoupServerMessage *paused;  /* the /slow request, answered at the end */
     int pass, fail, skip;
     gint64 deadline;
@@ -457,6 +475,187 @@ first_port (SoupServer *server)
     return port;
 }
 
+/* A listening socket on ip for server (plain http), the port the kernel's choice; 0 on failure. */
+static guint16
+listen_on (SoupServer *server, const char *ip)
+{
+    GError *error = NULL;
+    GInetAddress *inet = g_inet_address_new_from_string (ip);
+    GSocketAddress *address = g_inet_socket_address_new (inet, 0);
+    GSocket *socket = g_socket_new (G_SOCKET_FAMILY_IPV4, G_SOCKET_TYPE_STREAM, G_SOCKET_PROTOCOL_TCP, &error);
+    GSocketAddress *bound = NULL;
+    guint16 port = 0;
+
+    if (socket != NULL && g_socket_bind (socket, address, TRUE, &error) && g_socket_listen (socket, &error)
+        && (bound = g_socket_get_local_address (socket, &error)) != NULL
+        && soup_server_listen_socket (server, socket, 0, &error))
+        port = g_inet_socket_address_get_port (G_INET_SOCKET_ADDRESS (bound));
+    else
+        g_printerr ("load-fail-test: cannot listen on %s: %s\n", ip, error != NULL ? error->message : "unknown error");
+    g_clear_error (&error);
+    g_clear_object (&bound);
+    g_clear_object (&socket);
+    g_object_unref (address);
+    g_object_unref (inet);
+    return port;
+}
+
+/* The HTTPS server of tls-race runs in a thread of its own with its own main context: the tool holds its main thread
+ * (the UI process' thread, which also runs st.server) after a load call, and that must delay only the web process'
+ * request, not the TLS handshake of WebKit's preconnect. It accepts the TCP connections itself, to count them (one
+ * per load: the main request took over the preconnect's connection; two: it came after the preconnect had failed and
+ * opened its own), and hands each to a SoupServer as a TLS server stream. */
+static struct {
+    GThread *thread;
+    GMainContext *context;
+    GMainLoop *loop;
+    GTlsCertificate *cert;
+    SoupServer *server;
+    gint connections;       /* atomic */
+    GMutex lock;
+    GCond cond;
+    gboolean ready, ok;
+} race;
+
+static void
+race_serve (SoupServer *server, SoupServerMessage *msg, const char *path, GHashTable *query, gpointer user_data)
+{
+    (void) server; (void) query; (void) user_data;
+    if (g_strcmp0 (path, "/tls") == 0)
+        respond_html (msg, SOUP_STATUS_OK, "<!doctype html><title>done:tls</title><body>tls</body>");
+    else
+        respond_html (msg, SOUP_STATUS_NOT_FOUND, "<!doctype html><title>done:404</title><body>not found</body>");
+}
+
+static gboolean
+race_incoming (GSocketService *service, GSocketConnection *connection, GObject *source, gpointer user_data)
+{
+    GError *error = NULL;
+    GIOStream *tls;
+
+    (void) service; (void) source; (void) user_data;
+    g_atomic_int_inc (&race.connections);
+    tls = g_tls_server_connection_new (G_IO_STREAM (connection), race.cert, &error);
+    if (tls != NULL) {
+        GSocketAddress *local = g_socket_connection_get_local_address (connection, NULL);
+        GSocketAddress *remote = g_socket_connection_get_remote_address (connection, NULL);
+        /* the handshake runs with the server's first read */
+        soup_server_accept_iostream (race.server, tls, local, remote, &error);
+        g_clear_object (&local);
+        g_clear_object (&remote);
+        g_object_unref (tls);
+    }
+    if (error != NULL) {
+        g_printerr ("load-fail-test: tls-race: %s\n", error->message);
+        g_clear_error (&error);
+    }
+    return TRUE;
+}
+
+static gpointer
+race_thread (gpointer data)
+{
+    GSocketService *service;
+    gboolean ok = TRUE;
+
+    (void) data;
+    g_main_context_push_thread_default (race.context);
+    race.server = soup_server_new ("server-header", "ucwebview-test", NULL);
+    soup_server_add_handler (race.server, NULL, race_serve, NULL, NULL);
+    service = g_socket_service_new ();
+    for (guint i = 0; i < (guint) opt_load_fail_tls_hosts && ok; i++) {
+        GError *error = NULL;
+        char ip[32];
+        GInetAddress *inet;
+        GSocketAddress *address, *effective = NULL;
+
+        g_snprintf (ip, sizeof ip, "127.0.1.%u", i + 1);
+        inet = g_inet_address_new_from_string (ip);
+        address = g_inet_socket_address_new (inet, 0);
+        ok = g_socket_listener_add_address (G_SOCKET_LISTENER (service), address, G_SOCKET_TYPE_STREAM,
+                                            G_SOCKET_PROTOCOL_TCP, NULL, &effective, &error);
+        if (ok) {
+            st.race_ports[i] = g_inet_socket_address_get_port (G_INET_SOCKET_ADDRESS (effective));
+        } else {
+            g_printerr ("load-fail-test: cannot listen for HTTPS on %s: %s\n", ip, error->message);
+            g_clear_error (&error);
+        }
+        g_clear_object (&effective);
+        g_object_unref (address);
+        g_object_unref (inet);
+    }
+    if (ok) {
+        g_signal_connect (service, "incoming", G_CALLBACK (race_incoming), NULL);
+        g_socket_service_start (service);
+    }
+    g_mutex_lock (&race.lock);
+    race.ready = TRUE;
+    race.ok = ok;
+    g_cond_signal (&race.cond);
+    g_mutex_unlock (&race.lock);
+    if (ok)
+        g_main_loop_run (race.loop);
+    g_socket_service_stop (service);
+    g_socket_listener_close (G_SOCKET_LISTENER (service));
+    g_object_unref (service);
+    soup_server_disconnect (race.server);
+    g_clear_object (&race.server);
+    g_main_context_pop_thread_default (race.context);
+    return NULL;
+}
+
+/* tls-race: plain http on 127.0.1.1, 127.0.1.2, ... (all of 127.0.0.0/8 is loopback on Linux) from st.server, the
+ * pages before the HTTPS loads of the same hosts, so that WebKit does not swap the web process for them; HTTPS from
+ * the thread above. The certificate is not for these addresses: WebKit sees BAD_IDENTITY next to UNKNOWN_CA. */
+static gboolean
+race_listen (GTlsCertificate *cert)
+{
+    for (guint i = 0; i < (guint) opt_load_fail_tls_hosts; i++) {
+        char ip[32];
+
+        g_snprintf (ip, sizeof ip, "127.0.1.%u", i + 1);
+        st.race_http_ports[i] = listen_on (st.server, ip);
+        if (st.race_http_ports[i] == 0)
+            return FALSE;
+    }
+    g_mutex_init (&race.lock);
+    g_cond_init (&race.cond);
+    race.context = g_main_context_new ();
+    race.loop = g_main_loop_new (race.context, FALSE);
+    race.cert = g_object_ref (cert);
+    race.thread = g_thread_new ("tls-race", race_thread, NULL);
+    g_mutex_lock (&race.lock);
+    while (!race.ready)
+        g_cond_wait (&race.cond, &race.lock);
+    g_mutex_unlock (&race.lock);
+    if (race.ok)
+        st.n_race = (guint) opt_load_fail_tls_hosts;
+    return race.ok;
+}
+
+static gboolean
+race_quit (gpointer data)
+{
+    (void) data;
+    g_main_loop_quit (race.loop);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+race_stop (void)
+{
+    if (race.thread == NULL)
+        return;
+    g_main_context_invoke (race.context, race_quit, NULL);
+    g_thread_join (race.thread);
+    race.thread = NULL;
+    g_main_loop_unref (race.loop);
+    g_main_context_unref (race.context);
+    g_clear_object (&race.cert);
+    g_mutex_clear (&race.lock);
+    g_cond_clear (&race.cond);
+}
+
 static gboolean
 servers_start (void)
 {
@@ -490,15 +689,18 @@ servers_start (void)
         st.tls_cert_sha256 = g_compute_checksum_for_data (G_CHECKSUM_SHA256, der->data, der->len);
         g_byte_array_unref (der);
         st.tls_server = soup_server_new ("server-header", "ucwebview-test", "tls-certificate", cert, NULL);
-        g_object_unref (cert);
         soup_server_add_handler (st.tls_server, NULL, serve, NULL, NULL);
-        if (!soup_server_listen (st.tls_server, address, SOUP_SERVER_LISTEN_HTTPS, &error)) {
-            g_printerr ("load-fail-test: cannot listen for HTTPS on 127.0.0.1: %s\n", error->message);
+        if (!soup_server_listen (st.tls_server, address, SOUP_SERVER_LISTEN_HTTPS, &error)
+            || (step_wanted ("tls-race") && !race_listen (cert))) {
+            if (error != NULL)
+                g_printerr ("load-fail-test: cannot listen for HTTPS on 127.0.0.1: %s\n", error->message);
             g_clear_error (&error);
+            g_object_unref (cert);
             g_object_unref (address);
             g_object_unref (loopback);
             return FALSE;
         }
+        g_object_unref (cert);
         st.tls_site = g_strdup_printf ("https://127.0.0.1:%u", first_port (st.tls_server));
     }
     g_object_unref (address);
@@ -602,8 +804,8 @@ step_tls (void)
                    G_TLS_CERTIFICATE_UNKNOWN_CA);
 
     /* the same certificate with an exception: the library accepts it and loads again, no failure at all. An http page
-     * between the attempts, as --site-test does (a load of the URI of the error page just shown was cancelled now and
-     * then in the WebKitGTK harness with process swaps) */
+     * between the attempts, as --site-test does. The load right after it failed now and then up to library 0.10.2,
+     * with "Operation was cancelled" before any certificate check (see step_tls_race()) */
     ok_uri = g_strconcat (st.site, "/ok", NULL);
     begin ();
     uc_webview_load_uri (st.wv, ok_uri);
@@ -744,6 +946,110 @@ step_timeout (void)
     check_failure ("timeout", uri, UC_WEBVIEW_FAIL_TIMEOUT, "g-io-error-quark", -1, 0);
 }
 
+static gboolean
+failed_and_finished_or_title (gconstpointer title)
+{
+    return failed_and_finished (NULL) || title_is (title);
+}
+
+/*
+ * tls-race (library 0.10.3): HTTPS loads of hosts whose certificate WebKit has not seen yet, a new one each time
+ * (127.0.1.1, 127.0.1.2, ...). Before a main-frame load the UI process asks the network process to preconnect to the
+ * host (WebPageProxy.cpp:2343), and the web process' request comes after it. When the request comes while the
+ * preconnect is still connecting, it takes over the connection and sees the certificate itself; when it comes after
+ * the preconnect has failed on the certificate, it opens its own. In between, the preconnect has rejected the
+ * certificate and cancelled itself, but its connection is still handed over, and the load fails with "Operation was
+ * cancelled" without a certificate check (uc_load_error.h). The library loads such a load again.
+ *
+ * To land in between, the tool holds its main thread (the UI process; the HTTPS server runs in a thread of its own)
+ * for a while after each load call, which delays only the web process' request, and moves the hold up after a load
+ * whose request took over the preconnect's connection (one connection at the server) and down after one that opened
+ * its own (two), with a step that halves at every turn: a staircase around the point where the order flips. Before
+ * each HTTPS load an http page of the same host, so that WebKit keeps the web process. Even attempts have an
+ * exception for the certificate's fingerprint (the page must show without detail or FAILED), odd ones none (exactly
+ * one detail, CERTIFICATE). The summary counts the loads the library repeated after such a cancellation, seen as a
+ * third STARTED (an accepted certificate brings a second one, and so does WebKit's error page after a failure).
+ */
+#define TLS_RACE_STEP_START_US 2000
+#define TLS_RACE_STEP_MIN_US   100
+
+static void
+step_tls_race (void)
+{
+    gint64 hold_us = 0, step_us = TLS_RACE_STEP_START_US;
+    int last_move = 0;
+    guint bad = 0, repeated = 0, taken = 0, own = 0;
+
+    if (st.tls_server == NULL) {
+        skip ("tls-race", "no --load-fail-tls-cert");
+        return;
+    }
+    for (guint i = 0; i < st.n_race && !st.terminated && !st.timed_out; i++) {
+        char host[32];
+        char *uri, *gap;
+        gboolean with_exception = i % 2 == 0, ok;
+        int before, connections = -1, move;
+        guint started;
+
+        g_snprintf (host, sizeof host, "127.0.1.%u", i + 1);
+        uri = g_strdup_printf ("https://%s:%u/tls", host, st.race_ports[i]);
+        gap = g_strdup_printf ("http://%s:%u/ok", host, st.race_http_ports[i]);
+        begin ();
+        uc_webview_load_uri (st.wv, gap);
+        spin_until (title_is, "done:ok", 10000);
+        if (with_exception && uc_webview_global_allow_certificate (host, st.tls_cert_sha256) != 0)
+            check (FALSE, "tls-race", "allow_certificate(%s) refused", host);
+        begin ();
+        before = g_atomic_int_get (&race.connections);
+        uc_webview_load_uri (st.wv, uri);
+        g_usleep ((gulong) hold_us);
+        /* the connections of the first load, before anything the library repeats */
+        if (spin_until (finished_n, GUINT_TO_POINTER (1), 15000))
+            connections = g_atomic_int_get (&race.connections) - before;
+        if (with_exception) {
+            spin_until (failed_and_finished_or_title, "done:tls", 15000);
+            settle ();
+            started = count ("started");
+            ok = title_is ("done:tls") && count ("detail") == 0 && count ("failed") == 0;
+            repeated += started >= 3;
+        } else {
+            spin_until (failed_and_finished, NULL, 15000);
+            settle ();
+            started = count ("started");
+            ok = count ("detail") == 1 && count ("failed") == 1;
+            for (guint k = 0; ok && k < st.events->len; k++) {
+                const Event *e = g_ptr_array_index (st.events, k);
+                if (g_strcmp0 (e->kind, "detail") == 0)
+                    ok = e->reason == UC_WEBVIEW_FAIL_CERTIFICATE
+                         && (e->tls_errors & G_TLS_CERTIFICATE_UNKNOWN_CA) != 0;
+            }
+            repeated += started >= 3;
+        }
+        if (!ok) {
+            char *seen = describe ();
+            bad++;
+            g_print ("load-fail-test: tls-race %s (%s, hold %" G_GINT64_FORMAT " us, %d connection(s)): %s\n", host,
+                     with_exception ? "exception" : "no exception", hold_us, connections, seen);
+            g_free (seen);
+        }
+        /* the staircase */
+        move = connections == 1 ? 1 : connections >= 2 ? -1 : 0;
+        taken += connections == 1;
+        own += connections >= 2;
+        if (move != 0 && last_move != 0 && move != last_move)
+            step_us = MAX (step_us / 2, TLS_RACE_STEP_MIN_US);
+        if (move != 0)
+            last_move = move;
+        hold_us = MAX (hold_us + move * step_us, 0);
+        g_free (gap);
+        g_free (uri);
+    }
+    check (bad == 0, "tls-race", "%u new hosts, %u with an exception (the page, no detail, no FAILED), %u without (one "
+           "detail, CERTIFICATE): %u unexpected; the request took over the preconnect's connection %u time(s), opened "
+           "its own %u time(s), last hold %" G_GINT64_FORMAT " us; %u load(s) repeated after a cancellation",
+           st.n_race, (st.n_race + 1) / 2, st.n_race / 2, bad, taken, own, hold_us, repeated);
+}
+
 int
 load_fail_test_run (int width, int height, double scale, int timeout_s)
 {
@@ -787,6 +1093,7 @@ load_fail_test_run (int width, int height, double scale, int timeout_s)
     STEP ("attachment", step_attachment);
     STEP ("http-error", step_http_error);
     STEP ("old-host", step_old_host);
+    STEP ("tls-race", step_tls_race);
 #undef STEP
 
     g_source_remove (ticker);
@@ -810,6 +1117,7 @@ load_fail_test_run (int width, int height, double scale, int timeout_s)
         soup_server_message_unpause (st.paused);
         g_clear_object (&st.paused);
     }
+    race_stop ();
     if (st.tls_server != NULL)
         soup_server_disconnect (st.tls_server);
     soup_server_disconnect (st.server);

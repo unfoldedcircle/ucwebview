@@ -612,6 +612,8 @@ on_load_changed (WebKitWebView *web_view, WebKitLoadEvent event, gpointer user_d
     if (event == WEBKIT_LOAD_STARTED) {
         wv->last_load_failed = FALSE;
         wv->tls_failure_errors = 0;
+        /* a repeat the library has queued yields to this load; the time for uc_site_wk_load_cancelled() (0.10.3) */
+        uc_site_wk_navigation (web_view, TRUE);
     }
     /* a load after a termination has a web process again (uc_page_wk.h) */
     uc_page_wk_load_changed (wv->page, event);
@@ -644,7 +646,6 @@ on_load_failed (WebKitWebView *web_view, WebKitLoadEvent event, const char *fail
     unsigned tls_errors = wv->tls_failure_errors;
     UcLoadFailure failure;
 
-    (void) web_view; (void) event;
     /* the flags belong to this failure only (load-failed comes right after the TLS signal) */
     wv->tls_failure_errors = 0;
     /* WebKit finished its authentication request before this signal; ours end now. A response the library refused
@@ -656,6 +657,11 @@ on_load_failed (WebKitWebView *web_view, WebKitLoadEvent event, const char *fail
         return FALSE; /* a navigation replaced by a newer one */
     if (refused)
         return FALSE; /* WebKit emits FINISHED next */
+    /* library 0.10.3: the load took over the connection of WebKit's preconnect after that had failed on the server's
+     * certificate, so it never saw the certificate (no load-failed-with-tls-errors, no exception could apply); the
+     * library loads it again from an idle. TRUE: no error page, WebKit emits FINISHED, the host hears no failure. */
+    if (uc_site_wk_load_cancelled (web_view, event, failing_uri, error, global.log_full_urls))
+        return TRUE;
     wv->last_load_failed = TRUE;
     uc_load_failure_from_error (&failure, error, tls_errors);
     {
@@ -857,13 +863,30 @@ uc_webview_internal_render_buffer (uc_webview *wv, WPEBuffer *buffer, GError **e
              * take a reference as the shared-memory path does (without it every frame dropped the buffer's own
              * reference: a GLib-CRITICAL per frame and a crash in free() after the next process swap). */
             GBytes *pixels = wpe_buffer_import_to_pixels (buffer, error);
+            gsize size = 0;
+            int stride;
+
             if (pixels == NULL) {
                 frame_free (frame);
                 return FALSE;
             }
+            /* The rows are the mapping's in WPE WebKit 2.54.2 and unpadded (width * 4) since 2.54.3, neither
+             * necessarily the plane's stride (wpe_buffer_dma_buf_get_stride(), which up to 0.10.2 went here): the
+             * GBytes is height whole rows in both, so its size gives the stride (library 0.10.3, uc_formats.h). */
+            frame->info.pixels = g_bytes_get_data (pixels, &size);
+            stride = uc_formats_pixels_stride (size, frame->info.width, frame->info.height);
+            if (stride < 0) {
+                g_set_error (error, WPE_VIEW_ERROR, WPE_VIEW_ERROR_RENDER_FAILED,
+                             "the pixels of a %dx%d frame are %" G_GSIZE_FORMAT " bytes, not whole rows of at least "
+                             "%d bytes", frame->info.width, frame->info.height, size, frame->info.width * 4);
+                g_warning ("ucwebview: cannot hand over a %dx%d %s frame: %" G_GSIZE_FORMAT " bytes of pixels",
+                           frame->info.width, frame->info.height, uc_fourcc_to_string (frame->info.fourcc, fourcc),
+                           size);
+                frame_free (frame);
+                return FALSE;
+            }
             frame->pixels = g_bytes_ref (pixels);
-            frame->info.pixels = g_bytes_get_data (frame->pixels, NULL);
-            frame->info.stride = (int) wpe_buffer_dma_buf_get_stride (dmabuf, 0);
+            frame->info.stride = stride;
         }
     } else if (WPE_IS_BUFFER_SHM (buffer)) {
         WPEBufferSHM *shm = WPE_BUFFER_SHM (buffer);
@@ -1781,6 +1804,7 @@ uc_webview_load_uri (uc_webview *wv, const char *uri)
     if (!load_allowed (wv, "load_uri", uri, uc_uri_policy_check (uri, global.allow_file_urls)))
         return;
     uc_wk_requests_host_navigation (wv->requests, TRUE);
+    uc_site_wk_navigation (wv->web_view, FALSE);
     webkit_web_view_load_uri (wv->web_view, uri);
 }
 
@@ -1797,6 +1821,7 @@ uc_webview_load_html (uc_webview *wv, const char *html, const char *base_uri)
                        uc_uri_policy_check_base (base_uri, global.allow_file_urls)))
         return;
     uc_wk_requests_host_navigation (wv->requests, TRUE);
+    uc_site_wk_navigation (wv->web_view, FALSE);
     webkit_web_view_load_html (wv->web_view, html, base_uri);
 }
 
@@ -1807,6 +1832,7 @@ uc_webview_reload (uc_webview *wv)
 {
     CHECK_VIEW (wv);
     uc_wk_requests_host_navigation (wv->requests, TRUE);
+    uc_site_wk_navigation (wv->web_view, FALSE);
     webkit_web_view_reload (wv->web_view);
 }
 
@@ -1815,6 +1841,7 @@ uc_webview_stop (uc_webview *wv)
 {
     CHECK_VIEW (wv);
     uc_wk_requests_host_navigation (wv->requests, FALSE);
+    uc_site_wk_navigation (wv->web_view, FALSE);
     webkit_web_view_stop_loading (wv->web_view);
 }
 
@@ -1825,6 +1852,7 @@ uc_webview_go_back (uc_webview *wv)
     if (!webkit_web_view_can_go_back (wv->web_view))
         return;     /* nothing happens: the page's requests stay */
     uc_wk_requests_host_navigation (wv->requests, TRUE);
+    uc_site_wk_navigation (wv->web_view, FALSE);
     webkit_web_view_go_back (wv->web_view);
 }
 
@@ -1835,6 +1863,7 @@ uc_webview_go_forward (uc_webview *wv)
     if (!webkit_web_view_can_go_forward (wv->web_view))
         return;
     uc_wk_requests_host_navigation (wv->requests, TRUE);
+    uc_site_wk_navigation (wv->web_view, FALSE);
     webkit_web_view_go_forward (wv->web_view);
 }
 

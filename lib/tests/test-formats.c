@@ -84,6 +84,37 @@ test_fourcc_string (void)
     g_assert_cmpuint (UC_FOURCC_ARGB8888, ==, ((guint32) 'A' | ((guint32) 'R' << 8) | ((guint32) '2' << 16) | ((guint32) '4' << 24)));
 }
 
+/* library 0.10.3: the stride of wpe_buffer_import_to_pixels() data from its size (uc_formats.h) */
+static void
+test_pixels_stride (void)
+{
+    /* WPE WebKit 2.54.3: rows without padding, also for a width whose buffer rows are padded (481 px: 1924 bytes,
+     * a 64-byte aligned plane has 1984) */
+    g_assert_cmpint (uc_formats_pixels_stride ((gsize) 480 * 4 * 800, 480, 800), ==, 1920);
+    g_assert_cmpint (uc_formats_pixels_stride ((gsize) 481 * 4 * 800, 481, 800), ==, 1924);
+    g_assert_cmpint (uc_formats_pixels_stride ((gsize) 1 * 4 * 1, 1, 1), ==, 4);
+    /* 2.54.2: the gbm_bo_map() mapping, height rows of the map's stride */
+    g_assert_cmpint (uc_formats_pixels_stride ((gsize) 1984 * 800, 481, 800), ==, 1984);
+    g_assert_cmpint (uc_formats_pixels_stride ((gsize) 2048 * 800, 480, 800), ==, 2048);
+    /* a linear copy of a tiled buffer may have another stride than the plane; the size is what counts */
+    g_assert_cmpint (uc_formats_pixels_stride ((gsize) 1936 * 3, 481, 3), ==, 1936);
+    /* not height whole rows */
+    g_assert_cmpint (uc_formats_pixels_stride ((gsize) 1920 * 800 + 1, 480, 800), ==, -1);
+    g_assert_cmpint (uc_formats_pixels_stride ((gsize) 1920 * 799, 480, 800), ==, -1);
+    /* rows shorter than width * 4 */
+    g_assert_cmpint (uc_formats_pixels_stride ((gsize) 1916 * 800, 480, 800), ==, -1);
+    g_assert_cmpint (uc_formats_pixels_stride (0, 480, 800), ==, -1);
+    /* no size */
+    g_assert_cmpint (uc_formats_pixels_stride (1920, 0, 1), ==, -1);
+    g_assert_cmpint (uc_formats_pixels_stride (1920, 480, 0), ==, -1);
+    g_assert_cmpint (uc_formats_pixels_stride (1920, -480, 1), ==, -1);
+    g_assert_cmpint (uc_formats_pixels_stride (1920, 480, -1), ==, -1);
+    /* a stride that does not fit the frame's int */
+    g_assert_cmpint (uc_formats_pixels_stride ((gsize) G_MAXINT + 1, 1, 1), ==, -1);
+    g_assert_cmpint (uc_formats_pixels_stride ((gsize) G_MAXINT, 1, 1), ==, G_MAXINT);
+    g_assert_cmpint (uc_formats_pixels_stride (G_MAXSIZE, G_MAXINT, 1), ==, -1);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -92,5 +123,6 @@ main (int argc, char **argv)
     g_test_add_func ("/formats/egl-modifiers", test_egl_modifiers);
     g_test_add_func ("/formats/without-modifiers", test_format_without_modifiers);
     g_test_add_func ("/formats/fourcc-string", test_fourcc_string);
+    g_test_add_func ("/formats/pixels-stride", test_pixels_stride);
     return g_test_run ();
 }

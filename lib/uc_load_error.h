@@ -63,6 +63,41 @@ void uc_load_failure_from_error (UcLoadFailure *failure, const GError *error, un
 /* A URI the scheme allowlist refused (uc_uri_policy.h): UC_WEBVIEW_FAIL_SCHEME_REFUSED, "", 0, 0, "". */
 void uc_load_failure_scheme_refused (UcLoadFailure *failure);
 
+/*
+ * A main-frame load that took over the connection of a preconnect which failed on the server's certificate (library
+ * 0.10.3). WebKit's preconnect (above) gets the TLS check first when the web process' request comes late: its
+ * accept-certificate handler rejects a certificate the session does not accept and cancels the preconnect's own
+ * GCancellable (NetworkDataTaskSoup.cpp:159-162, 502-515, 300-310 in WebKit 2.54.2 and 2.54.3). libsoup still hands
+ * the connection to the main request until the connect operation has completed: it checks only that the preconnect is
+ * in CONNECTING (soup_session_steal_preconnection(), soup-session.c:1741-1764 in libsoup 3.8.1), and the connect runs
+ * with the preconnect's GCancellable (soup-session.c:1794-1799, soup-connection.c:808-833), whose cancellation the
+ * completion hands to the main request (connect_async_complete(), soup-session.c:1709-1738; GTask returns the
+ * cancellation first). So the load fails with g-io-error-quark G_IO_ERROR_CANCELLED a moment after STARTED, without
+ * load-failed-with-tls-errors: the main request never saw the certificate, no certificate exception can apply, and
+ * the reason would be TIMEOUT. Another load of the URI checks the certificate itself.
+ * TRUE when a load-failed is that: the URI is https, the load was provisional (WEBKIT_LOAD_STARTED), the error
+ * domain string and code are G_IO_ERROR_CANCELLED, and it came less than UC_LOAD_ERROR_CANCELLED_EARLY_US after
+ * STARTED (since_started_us; negative: unknown, FALSE). A host that never answers is cancelled by the preconnect's
+ * 10 s timeout (NetworkProcess.cpp:1759-1770) and stays a failure (TIMEOUT).
+ */
+#define UC_LOAD_ERROR_CANCELLED_EARLY_US (5 * G_USEC_PER_SEC)
+gboolean uc_load_error_cancelled_early (const char *uri, const char *domain, int code, gboolean provisional,
+                                        gint64 since_started_us);
+
+/* The loop guard of those repeated loads: a URI is loaded again at most UC_LOAD_RETRIES_MAX times within
+ * UC_LOAD_RETRIES_WINDOW_US of the first repeat; then the failure goes to the host as it is. Zero-initialised. */
+#define UC_LOAD_RETRIES_MAX       2
+#define UC_LOAD_RETRIES_WINDOW_US (10 * G_USEC_PER_SEC)
+typedef struct {
+    char *uri;
+    gint64 first_us;
+    guint count;
+} UcLoadRetries;
+
+/* TRUE (and counted): uri may be loaded again at now_us (g_get_monotonic_time()). */
+gboolean uc_load_retries_take  (UcLoadRetries *retries, const char *uri, gint64 now_us);
+void     uc_load_retries_clear (UcLoadRetries *retries);
+
 G_END_DECLS
 
 #endif /* UC_LOAD_ERROR_H */

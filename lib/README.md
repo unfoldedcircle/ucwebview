@@ -161,10 +161,20 @@ calls from other threads with a `g_critical`.
 4. `uc_webview_frame_release(handle)` → `wpe_view_buffer_released()` → `ReleaseBuffer` to the web process
    (`AcceleratedBackingStore.cpp:312-319`), then the library drops its reference. Keep at most two frames.
 
-Shared memory frames (`WPEBufferSHM`, `AcceleratedBackingStore.cpp:153-171`) are handed over as `pixels`. Without a
-host EGLDisplay (`uc_webview_global_init()` with `NULL`) a DMA-BUF frame is mapped with
-`wpe_buffer_import_to_pixels()` and handed over as `pixels` too; that `GBytes` is owned by the buffer (transfer none,
-`WPEBuffer.cpp:282-291`), so the library takes its own reference (since 0.6.5).
+Shared memory frames (`WPEBufferSHM`, `AcceleratedBackingStore.cpp:153-171`) are handed over as `pixels`. Without a host
+EGLDisplay (`uc_webview_global_init()` with `NULL`) a DMA-BUF frame is mapped with `wpe_buffer_import_to_pixels()` and
+handed over as `pixels` too; that `GBytes` is owned by the buffer (transfer none, `WPEBuffer.cpp:282-291`), so the
+library takes its own reference (since 0.6.5). Its rows changed in WPE WebKit 2.54.3: up to 2.54.2 the `GBytes` is the
+`gbm_bo_map()` mapping, `height` rows of the map's stride (`WPEBufferDMABuf.cpp:264-283` in 2.54.2), since 2.54.3 the
+rows are not padded, `width * 4` bytes, and a mapping with another stride is copied row by row
+(`WPEBufferDMABuf.cpp:273-283`, `wpeBufferCopyPixelsWithoutRowPadding()` in `WPEBuffer.cpp:285-296`, and the function's
+documentation, "The rows of the returned data are not padded"). Up to 0.10.2 the library passed the stride of the
+buffer's first plane (`wpe_buffer_dma_buf_get_stride()`), which is wrong with 2.54.3 for every width whose plane rows
+are padded (a sheared picture, and a host that reads `height` rows of that stride reads past the end of the pixels), and
+with 2.54.2 whenever the driver maps through a copy with another stride. Since 0.10.3 `stride` is the size of the
+`GBytes` divided by `height`, which is right for both without a version check; a size that is not `height` rows of at
+least `width * 4` bytes drops the frame with a warning (`uc_formats_pixels_stride()`, unit-tested in
+`tests/test-formats.c`). Hosts always use `stride`, never `width * 4`.
 
 ### Frame pacing and the display refresh rate
 
@@ -549,14 +559,15 @@ Showing `file:` pages needs shared-mime-info (GPL-2.0-or-later data) in the host
 ### Load failures (0.10.0)
 
 `load_failed_detail(uri, reason, error_domain, error_code, tls_errors, message)` tells the host why a main-frame load
-failed, so that it can say so ("the host name does not resolve", "no network", ...) instead of a generic text. It
-comes right before `load_changed(UC_WEBVIEW_LOAD_FAILED)` of the same failure, with the same `uri`: exactly one detail
-and one FAILED per failure, and no detail without a FAILED. The loads that bring no FAILED bring no detail either: a
-load replaced by a newer one (`WEBKIT_NETWORK_ERROR_CANCELLED`), a response the library refuses (`response_refused`,
-"Requests (0.7.0)"), a certificate an exception accepts (the library loads again), HTTP error pages (they load as
-pages). A host of an older header (`uc_webview_new_sized()` with a struct up to `response_refused`, or
-`uc_webview_new()`) gets FAILED alone, as before; an older library never calls the callback, so "no detail before
-FAILED" means "reason unknown".
+failed, so that it can say so ("the host name does not resolve", "no network", ...) instead of a generic text. It comes
+right before `load_changed(UC_WEBVIEW_LOAD_FAILED)` of the same failure, with the same `uri`: exactly one detail and one
+FAILED per failure, and no detail without a FAILED. The loads that bring no FAILED bring no detail either: a load
+replaced by a newer one (`WEBKIT_NETWORK_ERROR_CANCELLED`), a response the library refuses (`response_refused`,
+"Requests (0.7.0)"), a certificate an exception accepts (the library loads again), an https load cancelled with the
+connection of WebKit's preconnect after that had failed on the certificate (0.10.3, the library loads again, see below),
+HTTP error pages (they load as pages). A host of an older header (`uc_webview_new_sized()` with a struct up to
+`response_refused`, or `uc_webview_new()`) gets FAILED alone, as before; an older library never calls the callback, so
+"no detail before FAILED" means "reason unknown".
 
 The reason comes from the domain and code of WebKit's `GError` (`uc_load_error.c`, unit-tested in
 `tests/test-load-error.c`), never from the message text; the strings are as WebKit passed them (`error_domain` is
@@ -588,6 +599,25 @@ Facts of WebKit 2.54 this rests on:
   opening to the page's request (`soup_session_steal_preconnection()`, `soup-session.c:1661-1682` in libsoup 3.4.4).
   So the load fails 10 s after STARTED with `g-io-error-quark` 19, "Operation was cancelled" (WebKitGTK 2.54.0, with
   and without process swaps). A load WebKit itself cancels is `WebKitNetworkError` 302 and never a FAILED.
+- The same takeover also brings a cancellation without any timeout (0.10.3). The preconnect checks the server's
+  certificate itself when the web process' request comes after the TLS handshake got that far, and a certificate the
+  session does not accept (no exception applied yet, or none at all) makes it cancel itself
+  (`NetworkDataTaskSoup.cpp:159-162, 502-515`). libsoup still hands its connection over until the connect operation
+  has completed (`soup_session_steal_preconnection()` checks only the preconnect's state, `soup-session.c:1741-1764` in
+  libsoup 3.8.1), and the connect, which runs with the preconnect's cancellable, ends the request with
+  `g-io-error-quark` 19 a moment after STARTED. That load never saw the certificate: no
+  `load-failed-with-tls-errors`, no exception could apply, and up to 0.10.2 the host got TIMEOUT instead of the page
+  (with an exception) or CERTIFICATE (without). It happens when the request comes within a millisecond or so after the
+  preconnect's rejection; WPE WebKit 2.54.3 in containers showed it in 3 of 100 runs of `--site-test` and in a few of
+  every ten CI runs. Since 0.10.3 the library loads such a load again from an idle when it is an https main-frame
+  load, still provisional, and failed less than 5 s after STARTED (the preconnect's own timeout is 10 s): no detail, no
+  FAILED, no error page, the host sees STARTED, FINISHED, then the new load, which checks the certificate itself (an
+  exception applies, or CERTIFICATE). At most twice within 10 s for one URI, then the failure goes to the host as
+  before (TIMEOUT); a navigation of the host or the page between the failure and the repeat wins (as for the
+  certificate exceptions). The decision and the guard are `uc_load_error_cancelled_early()` and `UcLoadRetries`
+  (`uc_load_error.c`, `tests/test-load-error.c`); `--load-fail-test`'s `tls-race` step provokes the case
+  ("ucwebview-test"). Log line: `ucwebview: https://192.168.1.20: load cancelled 2 ms after it started, on the
+  connection of WebKit's preconnect, which had failed on the server's certificate; loading again`.
   libsoup has no I/O timeout in WebKit's session (`SoupNetworkSession.cpp:116-118`); the kernel's connect timeout
   (`G_IO_ERROR_TIMED_OUT`, about 130 s) and WebKit's own request timeout (`WebKitNetworkError` -1001,
   `ResourceErrorSoup.cpp:109-118`, only for requests with a timeout interval) are mapped too.
@@ -1032,7 +1062,12 @@ waits for it: when a main-frame load fails on its certificate while the policy i
 The library computes the SHA-256 of its DER encoding, and when an exception matches (that fingerprint, or `sha256`
 NULL: any certificate of the host) it accepts the certificate for the host in the session
 (`SoupNetworkSession.cpp:346-349`), returns TRUE (WebKit emits FINISHED without `load-failed`) and loads the URI again
-from an idle. The host sees STARTED, FINISHED, then STARTED, COMMITTED, FINISHED of the new load. When the same URI
+from an idle. The host sees STARTED, FINISHED, then STARTED, COMMITTED, FINISHED of the new load. Since 0.10.3 a
+navigation call of the host (`load_uri`, `load_html`, `reload`, `stop`, `go_back`, `go_forward`), for example from its
+FINISHED callback, or another load that starts first, wins: the library does not load the URI again then
+(`ucwebview: <origin>: not loaded again, another navigation came first`; up to 0.10.2 the repeated load replaced that
+navigation). The first load can also fail before WebKit shows it the certificate, on the connection of a preconnect
+that rejected it; the library loads it again as well ("Load failures (0.10.0)"). When the same URI
 fails again within 10 s with the same certificate after two such attempts, the library gives up (WebKit's failure as
 usual); since 0.8.3 the guard is keyed on the certificate's fingerprint too: another certificate of a
 load-balanced host with an exception of its own is accepted again, and the same certificate gets a second attempt,
@@ -1390,7 +1425,10 @@ Site settings (0.8.0) log what was set, never a secret: `ucwebview: 2 origin hea
 values), `origin headers for <origin> removed`, `ucwebview: user agent mobile`, the default user agent at start (above),
 `setting 2 cookie(s) for <URI>` and `2 cookie(s) set` (a refused cookie by its name and the rule, never a value),
 `certificate exception for <host>: the certificate with SHA-256 <fingerprint>` or `any certificate`, the TLS failure
-lines of "Certificate exceptions", `TLS certificate errors ignored for every host` / `checked`, `dark color scheme`,
+lines of "Certificate exceptions", the repeated loads (0.10.3) `<origin>: load cancelled 2 ms after it started, on the
+connection of WebKit's preconnect, ...; loading again`, `... again after 2 repeated loads within 10 s; not loading it
+again` and `<origin>: not loaded again, another navigation came first`, `TLS certificate errors ignored for every
+host` / `checked`, `dark color scheme`,
 `clearing website data: all`, `website data cleared: all`. The web process extension logs only when one of the library's
 own scripts throws (0.9.0): `ucwebview extension: ucwebview-device-host-shim.js threw (line N)`, the line and never a
 value.
@@ -1435,7 +1473,7 @@ ucwebview-test --download-test [--plain-new]
 ucwebview-test --link-test [--link-variants still,moves,...] [--link-elements frag,link,...] [--size WxH]
 ucwebview-test --site-test [--site-tls-cert FILE] [--data-dir DIR [--site-expect-persisted]] [--site-steps ua,cookies,...]
 ucwebview-test --device-test [--timeout S]
-ucwebview-test --load-fail-test [--load-fail-tls-cert FILE] [--load-fail-steps dns,refused,...]
+ucwebview-test --load-fail-test [--load-fail-tls-cert FILE] [--load-fail-steps dns,refused,...] [--load-fail-tls-hosts N]
 ```
 
 - Creates an EGLDisplay on an EGL device (`EGL_EXT_platform_device`; prefers the device with a real render node, so
@@ -1700,10 +1738,22 @@ ucwebview-test --load-fail-test [--load-fail-tls-cert FILE] [--load-fail-steps d
   order, `""` 0 0 `""`), and loads that must bring neither detail nor FAILED: `cancelled` (a load the server never
   answers, replaced by the next one), `attachment` (a refused response), `http-error` (a 404 page), `old-host` (a
   second view created with the struct size of a 0.9 host: FAILED without detail although the field behind that size
-  is set). Each failure must bring exactly one detail as the event right before its one FAILED, with the same URI.
-  Output `load-fail-test: PASS dns-reason: HOST_NOT_FOUND (g-resolver-error-quark 0, tls 0x0, "Error resolving ...")`,
-  at the end `load-fail-test: 21 passed, 0 failed, 0 skipped: ok` (exit 0; without the certificate 17 passed and 1
-  skipped), else `FAILED` (1) or `TIMEOUT` (2, default 360 s). Without the network: `dns` passes with
+  is set), and `tls-race` (0.10.3, with the certificate): 24 HTTPS loads (`--load-fail-tls-hosts N`, 2 to 48) of new
+  hosts `127.0.1.1`, `127.0.1.2`, ... (all of `127.0.0.0/8` is loopback on Linux; an http page of the same host before
+  each, so that WebKit keeps the web process), every other one with an exception for the certificate's fingerprint:
+  the page must show without detail or FAILED, the others must fail once with CERTIFICATE. The HTTPS server runs in a
+  thread of its own and counts the connections of each load; after a load call the tool holds its main thread (the
+  UI process) for a while, which delays the web process' request against WebKit's preconnect, longer after a load
+  whose request took over the preconnect's connection, shorter after one that opened its own, with a step that halves
+  at each turn. That keeps the loads around the point where the request comes right after the preconnect rejected the
+  certificate ("Load failures (0.10.0)"): about 1.2 ms on an x86_64 build host, where 5 to 11 of the 24 loads then
+  take over a rejected connection, which library 0.10.2 reported as TIMEOUT in every run. The check line counts them:
+  `load-fail-test: PASS tls-race: 24 new hosts, ... 0 unexpected; the request took over the preconnect's connection 13
+  time(s), opened its own 11 time(s), last hold 1250 us; 9 load(s) repeated after a cancellation`. Each failure must
+  bring exactly one detail as the event right before its one FAILED, with the same URI. Output
+  `load-fail-test: PASS dns-reason: HOST_NOT_FOUND (g-resolver-error-quark 0, tls 0x0, "Error resolving ...")`, at the
+  end `load-fail-test: 22 passed, 0 failed, 0 skipped: ok` (exit 0; without the certificate 17 passed and 2 skipped;
+  21 passed up to 0.10.2), else `FAILED` (1) or `TIMEOUT` (2, default 360 s). Without the network: `dns` passes with
   TEMPORARY_FAILURE as well. In every other mode the tool prints `load failed: <uri>: <REASON> (<domain> <code>, tls
   0x<flags>): <message>` before `load FAILED`.
 - Exit codes: 0 ok, 1 load failure / a refused URL / web process termination / IME mismatch / a zoom step that did not
@@ -1918,7 +1968,8 @@ nm -D /usr/lib/libucwebview.so.1 | grep -c ' T uc_webview_'               # 51 (
 # device state for web pages (0.9.0)
 ucwebview-test --device-test; echo $?                                  # one PASS line per step, "throttle: N ticks ... while hidden" with N <= 6 (about 30 without the throttling), "device-test: 21 passed, 0 failed: ok", 0
 # load failure reasons (0.10.0); site-test.pem as for --site-test
-ucwebview-test --load-fail-test --load-fail-tls-cert /tmp/site-test.pem; echo $?   # one PASS line per check, "load-fail-test: 21 passed, 0 failed, 0 skipped: ok", 0
+ucwebview-test --load-fail-test --load-fail-tls-cert /tmp/site-test.pem; echo $?   # one PASS line per check, "load-fail-test: 22 passed, 0 failed, 0 skipped: ok", 0 (21 up to 0.10.2)
+ucwebview-test --load-fail-test --load-fail-tls-cert /tmp/site-test.pem --load-fail-steps tls-race; echo $?   # "PASS tls-race: ... 0 unexpected; ... N load(s) repeated after a cancellation", 0 (0.10.3; 0.10.2: FAIL, TIMEOUT details)
 ucwebview-test http://www.example.invalid/ --frames 1; echo $?          # "load failed: http://www.example.invalid: HOST_NOT_FOUND (g-resolver-error-quark 0, tls 0x0): Error resolving ...", "load FAILED: ...", 1
 journalctl -u <host unit> -b | grep 'load failed'                   # "ucwebview: load failed: <uri>: <message> (<domain> <code>)"
 journalctl -u <host unit> -b | grep -E 'hidden pages throttled|device API'   # the start line ends "hidden pages throttled"; "device API on (...)" for a web view with device_api
