@@ -1,0 +1,139 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Unfolded Circle ApS
+#
+# Level 1 (jobs unit, syntax, lint) runs on GitHub-hosted runners without WPE WebKit: the GLib unit tests, the
+# sanitizer build, a syntax check of every WPE source against the headers of the official WPE WebKit release tarball,
+# and the lints. Level 2 (job distro) builds, installs and runs the library and the launcher against the WPE WebKit
+# of a rolling distribution in a container, see docs/ci-level-2.md. Set the repository variable CI_DISTRO_BUILD to
+# "false" to skip level 2.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # the release the syntax check runs against; the SHA-256 is the one of wpewebkit-2.54.2.tar.xz.sums
+  WPE_VERSION: 2.54.2
+  WPE_SHA256: f3284e19e47fcb5ac8c63c2e1c113dbd65b2423eb8a545f5b345707829004f56
+
+jobs:
+  unit:
+    name: Unit tests (${{ matrix.cc }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang libclang-rt-dev pkgconf libglib2.0-dev \
+            libegl-dev dbus
+          command -v node || sudo apt-get install -y --no-install-recommends nodejs
+
+      - name: lib unit tests
+        run: make -C lib check
+
+      - name: lib page script test (Node 19 or newer)
+        run: |
+          node --version
+          make -C lib check-js
+
+      - name: launcher unit tests
+        run: make -C launcher check
+
+      - name: lib unit tests with ASan and UBSan
+        run: make -C lib check-asan
+
+  syntax:
+    name: Syntax check against WPE WebKit headers
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkgconf python3 libglib2.0-dev libegl-dev \
+            libgles-dev libpng-dev libsoup-3.0-dev libxkbcommon-dev
+
+      - name: Cache the WPE WebKit release tarball
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cache/wpewebkit-${{ env.WPE_VERSION }}.tar.xz
+          key: wpewebkit-${{ env.WPE_VERSION }}-${{ env.WPE_SHA256 }}
+
+      - name: Generate the WPE WebKit headers (SHA-256 checked)
+        run: make wpe-headers
+
+      - name: lib syntax check
+        run: make -C lib syntax-check WPE_HOST_INCLUDE="$PWD/.cache/wpe-host-include-$WPE_VERSION"
+
+      - name: lib negative probe (must be rejected)
+        run: make -C lib syntax-check-negative WPE_HOST_INCLUDE="$PWD/.cache/wpe-host-include-$WPE_VERSION"
+
+      - name: lib screen glue against a fake WPEScreen
+        run: make -C lib check-wpe-fake WPE_HOST_INCLUDE="$PWD/.cache/wpe-host-include-$WPE_VERSION"
+
+      - name: launcher syntax check
+        run: make -C launcher syntax-check WPE_HOST_INCLUDE="$PWD/.cache/wpe-host-include-$WPE_VERSION"
+
+  lint:
+    name: Lint (SPDX headers, white space, shellcheck)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck
+
+      - name: make lint
+        run: make lint
+
+  distro:
+    name: Build and run on ${{ matrix.image }}
+    if: vars.CI_DISTRO_BUILD != 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # rolling distributions that ship WPE WebKit 2.54 with WPEPlatform (wpe-platform-2.0.pc)
+        image: ['debian:testing', 'archlinux:latest']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build, install and run the smoke tests
+        run: ./scripts/ci-distro.sh --deps
