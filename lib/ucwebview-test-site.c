@@ -1040,9 +1040,11 @@ step_headers (void)
 static gboolean
 load_tls (const char *url, gboolean expect_ok)
 {
-    /* An http page of the site between the attempts: with process swaps (WebKitGTK harness) a load of the URI whose
-     * error page WebKit showed after the previous attempt failed now and then with "Operation was cancelled" before
-     * any certificate check (2 of 8 full runs on WebKitGTK 2.54.0, the device never) */
+    /* An http page of the site between the attempts. Up to library 0.10.2 an attempt failed now and then with
+     * "Operation was cancelled" before any certificate check (2 of 8 full runs on WebKitGTK 2.54.0, 3 of 100 on WPE
+     * WebKit 2.54.3 in containers): its request took over the connection of WebKit's preconnect after that had failed
+     * on the certificate; the library loads such a load again since 0.10.3 (uc_load_error.h; --load-fail-test's
+     * tls-race step provokes it) */
     char *gap = g_strconcat (st.site, "/headers/tls-gap", NULL);
     load (gap, "done:tls-gap");
     g_free (gap);

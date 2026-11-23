@@ -34,5 +34,6 @@ tests/gtk-ext/
 tests/test-device
 tests/test-load-error
 tests/test-device-asan
+tests/test-load-error-asan
 uc_device_shim.h
 uc_device_shim.h.tmp

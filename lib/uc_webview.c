@@ -612,6 +612,8 @@ on_load_changed (WebKitWebView *web_view, WebKitLoadEvent event, gpointer user_d
     if (event == WEBKIT_LOAD_STARTED) {
         wv->last_load_failed = FALSE;
         wv->tls_failure_errors = 0;
+        /* a repeat the library has queued yields to this load; the time for uc_site_wk_load_cancelled() (0.10.3) */
+        uc_site_wk_navigation (web_view, TRUE);
     }
     /* a load after a termination has a web process again (uc_page_wk.h) */
     uc_page_wk_load_changed (wv->page, event);
@@ -644,7 +646,6 @@ on_load_failed (WebKitWebView *web_view, WebKitLoadEvent event, const char *fail
     unsigned tls_errors = wv->tls_failure_errors;
     UcLoadFailure failure;
 
-    (void) web_view; (void) event;
     /* the flags belong to this failure only (load-failed comes right after the TLS signal) */
     wv->tls_failure_errors = 0;
     /* WebKit finished its authentication request before this signal; ours end now. A response the library refused
@@ -656,6 +657,11 @@ on_load_failed (WebKitWebView *web_view, WebKitLoadEvent event, const char *fail
         return FALSE; /* a navigation replaced by a newer one */
     if (refused)
         return FALSE; /* WebKit emits FINISHED next */
+    /* library 0.10.3: the load took over the connection of WebKit's preconnect after that had failed on the server's
+     * certificate, so it never saw the certificate (no load-failed-with-tls-errors, no exception could apply); the
+     * library loads it again from an idle. TRUE: no error page, WebKit emits FINISHED, the host hears no failure. */
+    if (uc_site_wk_load_cancelled (web_view, event, failing_uri, error, global.log_full_urls))
+        return TRUE;
     wv->last_load_failed = TRUE;
     uc_load_failure_from_error (&failure, error, tls_errors);
     {
@@ -1781,6 +1787,7 @@ uc_webview_load_uri (uc_webview *wv, const char *uri)
     if (!load_allowed (wv, "load_uri", uri, uc_uri_policy_check (uri, global.allow_file_urls)))
         return;
     uc_wk_requests_host_navigation (wv->requests, TRUE);
+    uc_site_wk_navigation (wv->web_view, FALSE);
     webkit_web_view_load_uri (wv->web_view, uri);
 }
 
@@ -1797,6 +1804,7 @@ uc_webview_load_html (uc_webview *wv, const char *html, const char *base_uri)
                        uc_uri_policy_check_base (base_uri, global.allow_file_urls)))
         return;
     uc_wk_requests_host_navigation (wv->requests, TRUE);
+    uc_site_wk_navigation (wv->web_view, FALSE);
     webkit_web_view_load_html (wv->web_view, html, base_uri);
 }
 
@@ -1807,6 +1815,7 @@ uc_webview_reload (uc_webview *wv)
 {
     CHECK_VIEW (wv);
     uc_wk_requests_host_navigation (wv->requests, TRUE);
+    uc_site_wk_navigation (wv->web_view, FALSE);
     webkit_web_view_reload (wv->web_view);
 }
 
@@ -1815,6 +1824,7 @@ uc_webview_stop (uc_webview *wv)
 {
     CHECK_VIEW (wv);
     uc_wk_requests_host_navigation (wv->requests, FALSE);
+    uc_site_wk_navigation (wv->web_view, FALSE);
     webkit_web_view_stop_loading (wv->web_view);
 }
 
@@ -1825,6 +1835,7 @@ uc_webview_go_back (uc_webview *wv)
     if (!webkit_web_view_can_go_back (wv->web_view))
         return;     /* nothing happens: the page's requests stay */
     uc_wk_requests_host_navigation (wv->requests, TRUE);
+    uc_site_wk_navigation (wv->web_view, FALSE);
     webkit_web_view_go_back (wv->web_view);
 }
 
@@ -1835,6 +1846,7 @@ uc_webview_go_forward (uc_webview *wv)
     if (!webkit_web_view_can_go_forward (wv->web_view))
         return;
     uc_wk_requests_host_navigation (wv->requests, TRUE);
+    uc_site_wk_navigation (wv->web_view, FALSE);
     webkit_web_view_go_forward (wv->web_view);
 }
 

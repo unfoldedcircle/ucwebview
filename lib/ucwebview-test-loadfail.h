@@ -9,8 +9,10 @@
  * HTTPS server inside the tool (--load-fail-tls-cert, the --site-test certificate), URIs the scheme allowlist refuses;
  * and loads that must bring no detail: a load replaced by a newer one (cancelled), a refused response (attachment),
  * an HTTP error page, an accepted certificate, and a view of a 0.9 host's callback struct. Each failure must bring
- * exactly one load_failed_detail() right before its one load_changed(FAILED), with the same uri. PASS/FAIL per check,
- * a summary, exit 0 only when all pass.
+ * exactly one load_failed_detail() right before its one load_changed(FAILED), with the same uri. The tls-race step
+ * (library 0.10.3) times HTTPS loads of new hosts against WebKit's preconnect, so that some take over the connection of
+ * a preconnect that failed on the certificate: neither a TIMEOUT nor a missing page. PASS/FAIL per check, a summary,
+ * exit 0 only when all pass.
  */
 #ifndef UCWEBVIEW_TEST_LOADFAIL_H
 #define UCWEBVIEW_TEST_LOADFAIL_H

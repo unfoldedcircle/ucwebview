@@ -212,7 +212,87 @@ test_webkit_domain (void)
         return;
     }
     g_assert_cmpstr (g_quark_to_string (network_error_quark ()), ==, UC_LOAD_ERROR_WEBKIT_NETWORK_DOMAIN);
+    /* stays loaded, as in tests/test-device.c: unloading WebKitGTK leaves a string of its constructors unreachable,
+     * which LeakSanitizer reports (make check-asan, 0.10.3) */
+    g_module_make_resident (module);
     g_module_close (module);
+}
+
+/* library 0.10.3: a load on the connection of a preconnect that failed on the certificate (uc_load_error.h) */
+static void
+test_cancelled_early (void)
+{
+    static const char https[] = "https://192.168.1.20/app", http[] = "http://192.168.1.20/app";
+    const gint64 s = G_USEC_PER_SEC;
+
+    /* what the race looks like: g-io-error-quark 19 a moment after STARTED, while provisional */
+    g_assert_true (uc_load_error_cancelled_early (https, IO, G_IO_ERROR_CANCELLED, TRUE, s * 7 / 10));
+    g_assert_true (uc_load_error_cancelled_early (https, IO, G_IO_ERROR_CANCELLED, TRUE, 0));
+    g_assert_true (uc_load_error_cancelled_early ("HTTPS://192.168.1.20/", IO, G_IO_ERROR_CANCELLED, TRUE, s));
+    g_assert_true (uc_load_error_cancelled_early (https, IO, G_IO_ERROR_CANCELLED, TRUE,
+                                                  UC_LOAD_ERROR_CANCELLED_EARLY_US - 1));
+    /* WebKit's 10 s preconnect timeout (a host that never answers) stays a failure, TIMEOUT */
+    g_assert_cmpint (UC_LOAD_ERROR_CANCELLED_EARLY_US, <, 10 * s);
+    g_assert_false (uc_load_error_cancelled_early (https, IO, G_IO_ERROR_CANCELLED, TRUE,
+                                                   UC_LOAD_ERROR_CANCELLED_EARLY_US));
+    g_assert_false (uc_load_error_cancelled_early (https, IO, G_IO_ERROR_CANCELLED, TRUE, 10 * s));
+    g_assert_cmpint (uc_load_error_reason (IO, G_IO_ERROR_CANCELLED, 0), ==, UC_WEBVIEW_FAIL_TIMEOUT);
+    /* no STARTED seen: unknown, reported */
+    g_assert_false (uc_load_error_cancelled_early (https, IO, G_IO_ERROR_CANCELLED, TRUE, -1));
+    /* only TLS brings a certificate check into the preconnect */
+    g_assert_false (uc_load_error_cancelled_early (http, IO, G_IO_ERROR_CANCELLED, TRUE, s / 2));
+    g_assert_false (uc_load_error_cancelled_early ("httpsx://a/", IO, G_IO_ERROR_CANCELLED, TRUE, s / 2));
+    g_assert_false (uc_load_error_cancelled_early ("data:text/html,https:", IO, G_IO_ERROR_CANCELLED, TRUE, s / 2));
+    g_assert_false (uc_load_error_cancelled_early (NULL, IO, G_IO_ERROR_CANCELLED, TRUE, s / 2));
+    /* after the commit it is not the connection of the main request */
+    g_assert_false (uc_load_error_cancelled_early (https, IO, G_IO_ERROR_CANCELLED, FALSE, s / 2));
+    /* every other error stays a failure */
+    g_assert_false (uc_load_error_cancelled_early (https, IO, G_IO_ERROR_TIMED_OUT, TRUE, s / 2));
+    g_assert_false (uc_load_error_cancelled_early (https, IO, G_IO_ERROR_CONNECTION_REFUSED, TRUE, s / 2));
+    g_assert_false (uc_load_error_cancelled_early (https, TLS, G_TLS_ERROR_BAD_CERTIFICATE, TRUE, s / 2));
+    g_assert_false (uc_load_error_cancelled_early (https, RESOLVER, G_IO_ERROR_CANCELLED, TRUE, s / 2));
+    /* WebKit's own cancellation (a newer load) never reaches this; the codes of another domain mean nothing */
+    g_assert_false (uc_load_error_cancelled_early (https, UC_LOAD_ERROR_WEBKIT_NETWORK_DOMAIN, 302, TRUE, s / 2));
+    g_assert_false (uc_load_error_cancelled_early (https, UC_LOAD_ERROR_WEBKIT_NETWORK_DOMAIN, G_IO_ERROR_CANCELLED,
+                                                   TRUE, s / 2));
+    g_assert_false (uc_load_error_cancelled_early (https, NULL, G_IO_ERROR_CANCELLED, TRUE, s / 2));
+    g_assert_false (uc_load_error_cancelled_early (https, "", G_IO_ERROR_CANCELLED, TRUE, s / 2));
+}
+
+/* the loop guard of those repeated loads */
+static void
+test_retries (void)
+{
+    static const char a[] = "https://192.168.1.20/", b[] = "https://192.168.1.21/";
+    const gint64 s = G_USEC_PER_SEC, t0 = 1000 * s;
+    UcLoadRetries r = { 0 };
+
+    g_assert_cmpint (UC_LOAD_RETRIES_MAX, ==, 2);
+    g_assert_true (uc_load_retries_take (&r, a, t0));
+    g_assert_true (uc_load_retries_take (&r, a, t0 + s));
+    /* a third cancellation within the window goes to the host */
+    g_assert_false (uc_load_retries_take (&r, a, t0 + 2 * s));
+    g_assert_false (uc_load_retries_take (&r, a, t0 + UC_LOAD_RETRIES_WINDOW_US - 1));
+    /* the window counts from the first repeat */
+    g_assert_true (uc_load_retries_take (&r, a, t0 + UC_LOAD_RETRIES_WINDOW_US));
+    g_assert_true (uc_load_retries_take (&r, a, t0 + UC_LOAD_RETRIES_WINDOW_US + s));
+    g_assert_false (uc_load_retries_take (&r, a, t0 + UC_LOAD_RETRIES_WINDOW_US + 2 * s));
+    /* another URI starts afresh, and so does the first one after it */
+    g_assert_true (uc_load_retries_take (&r, b, t0 + 13 * s));
+    g_assert_true (uc_load_retries_take (&r, b, t0 + 13 * s));
+    g_assert_false (uc_load_retries_take (&r, b, t0 + 13 * s));
+    g_assert_true (uc_load_retries_take (&r, a, t0 + 14 * s));
+    /* a clock that went back (another source of times) is not inside the window */
+    g_assert_true (uc_load_retries_take (&r, a, t0));
+    g_assert_cmpuint (r.count, ==, 1);
+    g_assert_false (uc_load_retries_take (&r, NULL, t0));
+    g_assert_cmpstr (r.uri, ==, a);
+    uc_load_retries_clear (&r);
+    g_assert_null (r.uri);
+    g_assert_cmpuint (r.count, ==, 0);
+    uc_load_retries_clear (&r);
+    g_assert_true (uc_load_retries_take (&r, a, t0));
+    uc_load_retries_clear (&r);
 }
 
 int
@@ -229,5 +309,7 @@ main (int argc, char **argv)
     g_test_add_func ("/load-error/scheme-refused", test_scheme_refused);
     g_test_add_func ("/load-error/values", test_values);
     g_test_add_func ("/load-error/webkit-domain", test_webkit_domain);
+    g_test_add_func ("/load-error/cancelled-early", test_cancelled_early);
+    g_test_add_func ("/load-error/retries", test_retries);
     return g_test_run ();
 }

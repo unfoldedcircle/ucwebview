@@ -19,7 +19,7 @@
 #   make check-asan       the ABI copy test (tests/test-abi.c), the rendered request queue
 #                         (tests/test-rendered.c), the pinch tracker (tests/test-pinch.c), the request
 #                         table (tests/test-requests.c), the IME state machine (tests/test-ime.c), the header,
-#                         site and device tests with AddressSanitizer and UBSan
+#                         site, device and load error tests with AddressSanitizer and UBSan
 #   make syntax-check     -fsyntax-only of the WPE sources against generated
 #                         host headers, see tests/mk-host-headers.py
 #   make syntax-check-negative  must FAIL: proves the syntax check bites
@@ -261,8 +261,13 @@ tests/test-headers-asan: tests/test-headers.c uc_headers.c uc_headers.h
 tests/test-site-asan: tests/test-site.c uc_site.c uc_site.h uc_webview.h
 	$(CC) $(ALL_CFLAGS) $(ASAN_FLAGS) $(TEST_CFLAGS) -I. -o $@ tests/test-site.c uc_site.c $(ALL_LDFLAGS) $(ASAN_FLAGS) $(TEST_LIBS)
 
+# The loop guard of the loads the library repeats keeps their URI (0.10.3).
+tests/test-load-error-asan: tests/test-load-error.c uc_load_error.c uc_load_error.h uc_webview.h
+	$(CC) $(ALL_CFLAGS) $(ASAN_FLAGS) $(TEST_CFLAGS) $(GMODULE_CFLAGS) -I. -o $@ tests/test-load-error.c uc_load_error.c \
+	    $(ALL_LDFLAGS) $(ASAN_FLAGS) $(TEST_LIBS) $(GMODULE_LIBS)
+
 check-asan: tests/test-abi-asan tests/test-rendered-asan tests/test-pinch-asan tests/test-requests-asan tests/test-ime-asan \
-            tests/test-headers-asan tests/test-site-asan tests/test-device-asan
+            tests/test-headers-asan tests/test-site-asan tests/test-device-asan tests/test-load-error-asan
 	./tests/test-abi-asan
 	./tests/test-rendered-asan
 	./tests/test-pinch-asan
@@ -271,6 +276,7 @@ check-asan: tests/test-abi-asan tests/test-rendered-asan tests/test-pinch-asan t
 	./tests/test-headers-asan
 	./tests/test-site-asan
 	./tests/test-device-asan
+	./tests/test-load-error-asan
 
 NODE ?= node
 check-js:
@@ -355,7 +361,7 @@ endif
 clean:
 	rm -f $(SONAME) libucwebview.so $(EXTENSION) ucwebview-test ucwebview.pc $(TESTS) tests/test-abi-asan tests/test-rendered-asan \
 	    tests/test-pinch-asan tests/test-requests-asan tests/test-ime-asan tests/test-headers-asan tests/test-site-asan \
-	    tests/test-device-asan uc_device_shim.h uc_device_shim.h.tmp \
+	    tests/test-device-asan tests/test-load-error-asan uc_device_shim.h uc_device_shim.h.tmp \
 	    tests/test-wpe-screen tests/ucwebview-test-gtk \
 	    tests/negative-probe.log
 	rm -rf tests/gtk-obj tests/gtk-ext

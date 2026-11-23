@@ -7,6 +7,24 @@ a patch release changes behaviour without a new export or type.
 
 ## Unreleased
 
+### Fixed
+
+- libucwebview: an https load could fail with TIMEOUT ("Operation was cancelled") a moment after it started when
+  WebKit did not accept the server's certificate yet. WebKit's preconnect to the server had rejected the certificate,
+  and the load went on with the preconnect's cancelled connection without checking the certificate itself: a
+  certificate exception for the server did not apply (the page did not show), and without one the host got TIMEOUT
+  instead of CERTIFICATE. The library now loads such a load again (an https load cancelled less than 5 s after it
+  started, at most twice within 10 s for one URI); the host sees STARTED and FINISHED without a failure, then the new
+  load. A server that never answers still fails with TIMEOUT after 10 s. No ABI change.
+- libucwebview: a load the library repeats (a certificate exception accepted the certificate, or the case above) no
+  longer replaces a navigation the host started in the meantime, for example from its FINISHED callback.
+
+### Added
+
+- ucwebview-test: `--load-fail-test` has a `tls-race` step (`--load-fail-tls-hosts N`) that times HTTPS loads of new
+  hosts against WebKit's preconnect, so that a part of them takes over the connection of a preconnect that rejected
+  the certificate; it needs `--load-fail-tls-cert` and adds about 25 s.
+
 ## [0.10.2] - 2026-11-23
 
 First public release. The library and the launcher have shipped in the firmware of the Remote Two and Remote 3; the
