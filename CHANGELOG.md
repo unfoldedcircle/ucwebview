@@ -7,6 +7,11 @@ a patch release changes behaviour without a new export or type.
 
 ## Unreleased
 
+### Fixed
+
+- libucwebview: `uc_webview_global_set_cookies()` no longer does pointer arithmetic on a NULL cookie value before
+  refusing it (undefined behaviour that clang's UBSan reports; the result was correct). No ABI change.
+
 ## [0.10.1]
 
 First public release. The library and the launcher have shipped in the firmware of the Remote Two and Remote 3; the

@@ -228,11 +228,17 @@ cookie_name_valid (const char *name)
 static gboolean
 cookie_value_valid (const char *value)
 {
-    gsize len = value != NULL ? strlen (value) : 0;
-    const char *p = value, *end = value + len;
+    gsize len;
+    const char *p, *end;
 
-    if (value == NULL || len > UC_SITE_COOKIE_MAX_VALUE_BYTES)
+    if (value == NULL)
         return FALSE;
+    len = strlen (value);
+    if (len > UC_SITE_COOKIE_MAX_VALUE_BYTES)
+        return FALSE;
+    /* after the NULL check: NULL + 0 is undefined in C (clang's -fsanitize=pointer-overflow reports it) */
+    p = value;
+    end = value + len;
     if (len >= 2 && value[0] == '"' && value[len - 1] == '"') {
         p++;
         end--;
