@@ -19,14 +19,17 @@
  *    platform thread holds while it dispatches GLib, so the raster thread would wait for the dispatch.
  *
  * Frame lifecycle (uc_webview.h, "Frame lifecycle"), per frame_ready():
- *   1. pushed as an unresolved texture frame (texture_push_unresolved_frame()); the engine is told a frame is there;
+ *   1. pushed as an unresolved texture frame (texture_push_unresolved_frame()); the engine is told a frame is there.
+ *      With the default pacing ("ahead", core/ucfl_pacing.h) the push is reported to the library as rendered at once,
+ *      and a frame that arrives while the previous push is not fetched yet waits in the view until it is; with
+ *      UC_WEBVIEW_FRAME_PACING=fetch every frame is pushed at once and reported when fetched;
  *   2. resolve_frame() when the engine fetches it: GL texture from the EGLImage (or glTexImage2D of a shared memory
- *      frame), and a "fetched" note -> uc_webview_frame_rendered() on the platform thread. flutter-pi has no
- *      "presented" signal per texture frame, so the fetch for the next raster pass counts as shown; WebKit then
- *      renders the next frame while this one is drawn and flipped (one frame of overlap, up to two frames held);
+ *      frame), and a "fetched" note to the platform thread: the waiting frame is pushed ("ahead"), or this one is
+ *      reported (uc_webview_frame_rendered(), "fetch");
  *   3. dropped (by the engine after the next fetch, or unfetched by flutter-pi) -> "released" note ->
  *      uc_webview_frame_release() and glDeleteTextures() on the platform thread in a context of the plugin's own
  *      (shared with flutter-pi's root context), made current only for that.
+ * Why not report a frame when it is on screen: core/ucfl_pacing.h.
  *
  * Frame dumps (README.md, "Frame dumps"; UC_WEBVIEW_DUMP_DIR): on the platform thread, never the raster thread. The
  * newest frame of a view (view->latest) stays valid until its "released" note is handled there, which is only after
@@ -45,6 +48,7 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/timerfd.h>
+#include <time.h>
 
 #include "flutter-pi.h"
 #include "gl_renderer.h"
@@ -55,6 +59,7 @@
 #include "ucfl_codec.h"
 #include "ucfl_dump.h"
 #include "ucfl_loader.h"
+#include "ucfl_pacing.h"
 #include "ucfl_protocol.h"
 #include "ucfl_views.h"
 #include "ucfp_glib_loop.h"
@@ -79,6 +84,9 @@ struct view {
     int frame_width, frame_height; /* of the last frame event */
     bool frame_zero_copy, had_frame;
     struct frame *latest; /* the newest frame pushed, NULL once released: what a frame dump writes */
+    struct ucfl_pacer pacer;
+    struct ucfl_frame_clock clock;
+    int64_t reported_ns; /* when a frame was last reported rendered, 0 once the next one arrived */
 };
 
 struct frame {
@@ -88,6 +96,8 @@ struct frame {
     GLuint texture;
     bool resolved;
     bool rendered;
+    int64_t pushed_ns; /* platform thread: handed to the engine */
+    int64_t fetch_ns;  /* raster thread, read on the platform thread after the "fetched" note */
     struct done fetched, released;
 };
 
@@ -112,7 +122,9 @@ struct plugin {
     int done_fd;       /* eventfd, -1 after deinit */
     sd_event_source *done_source;
 
-    uint64_t frames_ready, frames_fetched, frames_released;
+    uint64_t frames_ready, frames_fetched, frames_released, frames_held;
+    enum ucfl_pacing_mode pacing; /* UC_WEBVIEW_FRAME_PACING */
+    struct ucfl_delay turnaround, to_fetch; /* of all views since the last stats reply */
 
     /* frame dumps (UC_WEBVIEW_DUMP_DIR), platform thread */
     struct ucfl_dump dump;
@@ -145,6 +157,15 @@ static void view_unref(struct view *view)
 {
     if (--view->refs == 0)
         free(view);
+}
+
+/* any thread */
+static int64_t now_ns(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t) ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
 /* any thread */
@@ -265,6 +286,7 @@ static int resolve_frame(size_t width, size_t height, void *userdata, struct tex
     out->gl.height = (size_t) frame->f.height;
     out->destroy = on_resolved_frame_destroy;
     out->userdata = frame;
+    frame->fetch_ns = now_ns();
     post_done(p, &frame->fetched);
     return 0;
 }
@@ -318,6 +340,8 @@ static bool make_own_context_current(struct plugin *p)
     return eglMakeCurrent(p->egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, p->egl_context) == EGL_TRUE;
 }
 
+static void apply_pace(struct view *view, struct ucfl_pace pace);
+
 static int on_done(sd_event_source *source, int fd, uint32_t revents, void *userdata)
 {
     struct plugin *p = userdata;
@@ -349,11 +373,13 @@ static int on_done(sd_event_source *source, int fd, uint32_t revents, void *user
         next = note->next;
         if (!note->released) {
             p->frames_fetched++;
-            if (view->wv && !frame->rendered)
-                p->lib.frame_rendered(view->wv, frame->f.handle);
-            frame->rendered = true;
+            ucfl_frame_clock_fetched(&view->clock, frame->fetch_ns);
+            ucfl_delay_add(&view->clock.to_fetch, frame->pushed_ns, frame->fetch_ns);
+            if (view->wv) /* not after dispose_view(): no texture, no library */
+                apply_pace(view, ucfl_pacer_fetched(&view->pacer, frame));
             continue;
         }
+        ucfl_pacer_gone(&view->pacer, frame);
         if (view->latest == frame)
             view->latest = NULL;
         if (view->wv)
@@ -580,26 +606,37 @@ static void stop_dumps(struct plugin *p)
     p->dump_fd = -1;
 }
 
-/* ---- platform thread: the library's callbacks (from the GLib dispatch) ----- */
+/* ---- platform thread: frame pacing (core/ucfl_pacing.h) ------------------------ */
 
-static void on_frame_ready(uc_webview *wv, const uc_webview_frame *f, void *user)
+/* a frame the engine never got: back to the library at once (which implies rendered) */
+static void release_unshown(struct view *view, struct frame *frame)
 {
-    struct view *view = user;
     struct plugin *p = view->plugin;
-    struct frame *frame = calloc(1, sizeof(*frame));
-    bool zero_copy = f->egl_image != NULL;
 
-    if (!frame) {
-        p->lib.frame_release(wv, f->handle);
+    if (view->wv)
+        p->lib.frame_release(view->wv, frame->f.handle);
+    p->frames_released++;
+    view_unref(view);
+    free(frame);
+}
+
+static void report_rendered(struct view *view, struct frame *frame)
+{
+    if (frame->rendered)
         return;
+    frame->rendered = true;
+    if (view->wv) {
+        view->plugin->lib.frame_rendered(view->wv, frame->f.handle);
+        view->reported_ns = now_ns();
     }
-    frame->view = view;
-    frame->f = *f;
-    frame->fetched.frame = frame;
-    frame->released.frame = frame;
-    frame->released.released = true;
-    view->refs++;
-    p->frames_ready++;
+}
+
+/* hands frame to the engine; false if the texture refused it */
+static bool push_frame(struct view *view, struct frame *frame)
+{
+    struct plugin *p = view->plugin;
+    const uc_webview_frame *f = &frame->f;
+    bool zero_copy = f->egl_image != NULL;
 
     if (!view->had_frame || f->width != view->frame_width || f->height != view->frame_height ||
         zero_copy != view->frame_zero_copy) {
@@ -617,15 +654,55 @@ static void on_frame_ready(uc_webview *wv, const uc_webview_frame *f, void *user
                                                          .resolve = resolve_frame,
                                                          .destroy = on_unresolved_frame_destroy,
                                                          .userdata = frame,
-                                                     }) != 0) {
-        p->lib.frame_release(wv, f->handle);
-        view_unref(view);
-        free(frame);
-        return;
-    }
+                                                     }) != 0)
+        return false;
+    frame->pushed_ns = now_ns();
     view->latest = frame;
     if (ucfl_dump_first(&p->dump))
         dump_frame(p, view, frame);
+    return true;
+}
+
+/* Platform thread, view not disposed: carries out what the pacer decided, in the order of struct ucfl_pace. */
+static void apply_pace(struct view *view, struct ucfl_pace pace)
+{
+    if (pace.release)
+        release_unshown(view, pace.release);
+    if (pace.push && !push_frame(view, pace.push)) {
+        ucfl_pacer_gone(&view->pacer, pace.push);
+        release_unshown(view, pace.push);
+        return;
+    }
+    if (pace.rendered)
+        report_rendered(view, pace.rendered);
+}
+
+/* ---- platform thread: the library's callbacks (from the GLib dispatch) ----- */
+
+static void on_frame_ready(uc_webview *wv, const uc_webview_frame *f, void *user)
+{
+    struct view *view = user;
+    struct plugin *p = view->plugin;
+    struct frame *frame = calloc(1, sizeof(*frame));
+
+    if (!frame) {
+        p->lib.frame_release(wv, f->handle);
+        return;
+    }
+    frame->view = view;
+    frame->f = *f;
+    frame->fetched.frame = frame;
+    frame->released.frame = frame;
+    frame->released.released = true;
+    view->refs++;
+    p->frames_ready++;
+
+    ucfl_delay_add(&view->clock.turnaround, view->reported_ns, now_ns());
+    view->reported_ns = 0;
+    /* a report from in here completes after this callback (uc_webview_frame_rendered()) */
+    apply_pace(view, ucfl_pacer_ready(&view->pacer, frame));
+    if (view->pacer.held == frame)
+        p->frames_held++;
 }
 
 static void on_load_changed(uc_webview *wv, int event, const char *uri, void *user)
@@ -679,7 +756,8 @@ static bool ensure_library(struct plugin *p)
         p->loaded = ucfl_lib_load(&p->lib, path && *path ? path : UC_WEBVIEW_SONAME, p->reason, sizeof(p->reason));
     }
     if (p->loaded)
-        LOG("web view available: libucwebview API %d", UC_WEBVIEW_API_VERSION);
+        LOG("web view available: libucwebview API %d, %s frame pacing", UC_WEBVIEW_API_VERSION,
+            ucfl_pacing_name(p->pacing));
     else
         LOG("web view unavailable: %s", p->reason);
     return p->loaded;
@@ -747,6 +825,8 @@ static void handle_create(struct plugin *p, const struct ucfl_call *call, struct
     }
     view->plugin = p;
     view->refs = 1;
+    ucfl_pacer_init(&view->pacer, p->pacing);
+    ucfl_frame_clock_init(&view->clock, call->create.refresh_rate);
     view->texture = flutterpi_create_texture(p->flutterpi);
     id = view->texture ? ucfl_views_add(&p->views, view) : -1;
     if (id < 0) {
@@ -783,8 +863,13 @@ static void dispose_view(struct plugin *p, struct view *view)
 {
     /* the texture first: afterwards the engine fetches none of its frames, so none is bound after the library freed
      * the EGLImages; a frame the engine still shows keeps its texture (an EGLImage's siblings outlive the image) */
+    struct frame *held;
+
     texture_destroy(view->texture);
     view->texture = NULL;
+    held = ucfl_pacer_take_held(&view->pacer);
+    if (held)
+        release_unshown(view, held);
     p->lib.destroy(view->wv);
     view->wv = NULL;
     view_unref(view);
@@ -793,13 +878,34 @@ static void dispose_view(struct plugin *p, struct view *view)
 static void handle_stats(struct plugin *p, struct ucfl_writer *w)
 {
     struct ucfp_glib_stats glib;
+    int64_t now = now_ns(), fps = 0;
+    uint64_t gaps = 0;
 
     ucfp_glib_loop_get_stats(p->glib, &glib);
+    for (size_t i = 0; i < p->views.count; i++) {
+        struct view *view = p->views.slots[i].data;
+        int64_t view_fps = ucfl_frame_clock_milli_fps(&view->clock, now);
+
+        if (view_fps > fps)
+            fps = view_fps; /* the view that draws */
+        gaps += view->clock.gaps;
+        ucfl_delay_take(&p->turnaround, &view->clock.turnaround);
+        ucfl_delay_take(&p->to_fetch, &view->clock.to_fetch);
+    }
     const struct ucfl_stat stats[] = {
         { "views", (int64_t) p->views.count },
         { "framesReady", (int64_t) p->frames_ready },
         { "framesFetched", (int64_t) p->frames_fetched },
         { "framesReleased", (int64_t) p->frames_released },
+        { "framesHeld", (int64_t) p->frames_held },
+        { "pacingAhead", p->pacing == UCFL_PACING_AHEAD },
+        { "monotonicMs", now / 1000000 },
+        { "fetchMilliFps", fps },
+        { "fetchGaps", (int64_t) gaps },
+        { "webTurnaroundAvgUs", ucfl_delay_avg_us(&p->turnaround) },
+        { "webTurnaroundMaxUs", p->turnaround.max_ns / 1000 },
+        { "pushToFetchAvgUs", ucfl_delay_avg_us(&p->to_fetch) },
+        { "pushToFetchMaxUs", p->to_fetch.max_ns / 1000 },
         { "glibDispatches", (int64_t) glib.dispatches },
         { "glibMaxDispatchUs", (int64_t) glib.max_dispatch_us },
         { "glibTotalDispatchUs", (int64_t) glib.total_dispatch_us },
@@ -807,6 +913,8 @@ static void handle_stats(struct plugin *p, struct ucfl_writer *w)
         { "glibEpollRebuilds", (int64_t) glib.epoll_rebuilds },
     };
     ucfl_put_stats_reply(w, stats, sizeof(stats) / sizeof(stats[0]));
+    memset(&p->turnaround, 0, sizeof(p->turnaround));
+    memset(&p->to_fetch, 0, sizeof(p->to_fetch));
 }
 
 static void on_control_message(void *userdata, const FlutterPlatformMessage *message)
@@ -912,6 +1020,8 @@ static enum plugin_init_result plugin_init(struct flutterpi *flutterpi, void **u
     p->egl_context = EGL_NO_CONTEXT;
     p->dump_fd = -1;
     ucfl_views_init(&p->views);
+    if (ucfl_pacing_parse(getenv("UC_WEBVIEW_FRAME_PACING"), &p->pacing) != 0)
+        LOG("UC_WEBVIEW_FRAME_PACING: unknown value (ahead, fetch): %s pacing", ucfl_pacing_name(p->pacing));
     pthread_mutex_init(&p->done_lock, NULL);
     p->done_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     if (p->done_fd < 0 || flutterpi_sd_event_add_io(&p->done_source, p->done_fd, EPOLLIN, on_done, p) != 0) {
@@ -957,11 +1067,12 @@ static void plugin_deinit(struct flutterpi *flutterpi, void *userdata)
     ucfp_glib_loop_get_stats(p->glib, &glib);
     if (glib.dispatches)
         LOG("GLib dispatches: %llu, longest %llu us, %llu longer than %u us, %llu epoll sets renewed, frames %llu ready, "
-            "%llu fetched, %llu released",
+            "%llu fetched, %llu released, %llu waited",
             (unsigned long long) glib.dispatches, (unsigned long long) glib.max_dispatch_us,
             (unsigned long long) glib.slow_dispatches, UCFP_GLIB_SLOW_US, (unsigned long long) glib.epoll_rebuilds,
             (unsigned long long) p->frames_ready,
-            (unsigned long long) p->frames_fetched, (unsigned long long) p->frames_released);
+            (unsigned long long) p->frames_fetched, (unsigned long long) p->frames_released,
+            (unsigned long long) p->frames_held);
     ucfp_glib_loop_destroy(p->glib);
     p->glib = NULL;
     stop_dumps(p);

@@ -58,13 +58,36 @@ An idle web view costs no wake-ups.
 **Frames.** `frame_ready` pushes an unresolved texture frame (`texture_push_unresolved_frame()`). When the engine
 fetches it, on the raster thread with the engine's GL context current, the plugin binds the frame's EGLImage to a new
 GL texture (`glEGLImageTargetTexture2DOES`, `GL_TEXTURE_2D` as remote-ui does, `GL_TEXTURE_EXTERNAL_OES` if the
-driver refuses that), or uploads a shared memory frame with `glTexImage2D`; zero copy for DMA-BUF frames. The fetch
-counts as "rendered" (`uc_webview_frame_rendered()`): flutter-pi has no per-texture "presented" signal, so WebKit
-renders its next frame while this one is drawn and flipped. When the engine drops the frame (it fetched the next
-one) or flutter-pi drops one the engine never fetched, the plugin releases it (`uc_webview_frame_release()`) and
-deletes the texture in a GL context of its own, shared with flutter-pi's. At most two frames are held. The raster
-thread reports to the platform thread through an eventfd, never through `flutterpi_post_platform_task()`, which waits
-for flutter-pi's event loop lock and so for a running GLib dispatch.
+driver refuses that), or uploads a shared memory frame with `glTexImage2D`; zero copy for DMA-BUF frames. When the
+engine drops the frame (it fetched the next one) or flutter-pi drops one the engine never fetched, the plugin releases
+it (`uc_webview_frame_release()`) and deletes the texture in a GL context of its own, shared with flutter-pi's. The
+raster thread reports to the platform thread through an eventfd, never through `flutterpi_post_platform_task()`, which
+waits for flutter-pi's event loop lock and so for a running GLib dispatch.
+
+**Frame pacing.** WebKit composites a frame only after the previous one was reported rendered
+(`uc_webview_frame_rendered()`), and flutter-pi starts its frames on the display's vblanks: a web frame is shown one
+refresh after the vblank of the first engine frame that fetches it, and only if it arrived, and the engine asked for
+a frame, before that vblank. When it is reported decides how long WebKit has for the next one
+([`core/ucfl_pacing.h`](core/ucfl_pacing.h)):
+
+- `ahead` (the default): a frame is reported when it is handed to the engine, and the next one waits in the plugin
+  until the engine fetched this one. WebKit works one frame ahead and has about two refresh periods per frame, while
+  it still composites exactly one frame per fetch, so a page that draws on every `requestAnimationFrame` stays locked
+  to the display. Costs one refresh period of latency while frames stream and one more buffer (three held: shown,
+  handed over, waiting).
+- `fetch` (`UC_WEBVIEW_FRAME_PACING=fetch`): a frame is reported when the engine fetches it, shortly after a vblank,
+  and the next one is pushed as it arrives. WebKit has one refresh period minus the fetch delay; each frame that takes
+  longer leaves a refresh without a new frame. At most two frames are held.
+
+A report after the page flip that shows the frame would come at the vblank before which the next engine frame has to
+be asked for, so every web frame would take two refresh periods; flutter-pi has no such signal for plugins anyway.
+
+`stats` reports the pacing next to the counters: `pacingAhead` (1 or 0), `framesHeld` (frames that waited),
+`fetchMilliFps` (the fetch rate over the last second times 1000, each fetched frame being shown at the next page flip),
+`fetchGaps` (fetch intervals of 1.5 to 4 refresh periods: a refresh without a new frame while the page drew),
+`webTurnaroundAvgUs`/`MaxUs` (report to WebKit's next frame) and `pushToFetchAvgUs`/`MaxUs` (frame handed to the
+engine to fetched), both since the previous `stats` reply and without pauses longer than 250 ms, and `monotonicMs`
+(the time of the reply, for rates between two replies).
 
 **Power.** `setMapped(false)` hides the page (`uc_webview_set_mapped()`): no rendering, no frames, no textures to
 draw. Marking a texture frame available makes the engine draw a frame even when the app draws nothing, so an app
@@ -114,6 +137,7 @@ The library (`libucwebview.so.1`) and WPE WebKit are run time dependencies of th
   the library before the first page load of the process.
 - Log lines start with `[uc_webview]`; they never contain URLs.
 - `UC_WEBVIEW_DUMP_DIR=<dir>`: frame dumps, see below.
+- `UC_WEBVIEW_FRAME_PACING=ahead|fetch`: see "Frame pacing" above (default `ahead`).
 
 ## Frame dumps
 
@@ -161,7 +185,7 @@ in its writable paths.
 On a Linux host with GLib and libsystemd development files:
 
 ```shell
-make -C flutter-pi check          # codec, protocol, loader (against fake libraries), view table, dump files, GLib loop
+make -C flutter-pi check          # codec, protocol, loader (fake libraries), views, dumps, pacing, GLib loop
 make -C flutter-pi check-asan     # the same with AddressSanitizer and UBSan
 make -C flutter-pi flutter-pi-build FLUTTER_PI_SRC=<flutter-pi checkout at 8b86c52>
 ```
