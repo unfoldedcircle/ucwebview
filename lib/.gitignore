@@ -33,6 +33,7 @@ tests/test-site-asan
 tests/gtk-ext/
 tests/test-device
 tests/test-load-error
+tests/test-cache-model
 tests/test-device-asan
 tests/test-load-error-asan
 uc_device_shim.h

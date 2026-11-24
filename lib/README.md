@@ -1291,7 +1291,9 @@ Environment read by the library: `UC_WEBVIEW_DEVELOPER_EXTRAS=1` (Web Inspector,
 `UC_WEBVIEW_DRAG_THRESHOLD=<px>` (1..200, default 16 px, see "Touch drag threshold"), `UC_WEBVIEW_REFRESH_RATE=<Hz>`
 (display refresh rate, wins over the host's value, see frame pacing), `UC_WEBVIEW_TRACE=1` (vsync, key and text input
 lines, see "What the logs carry"), `UC_WEBVIEW_LOG_FULL_URLS=1` (URIs in log lines with path, query, fragment and
-payload), `UC_WEBVIEW_PDF_VIEWER=1` (WebKit's PDF viewer stays on, see "PDF viewer"), `G_MESSAGES_DEBUG=all`;
+payload), `UC_WEBVIEW_PDF_VIEWER=1` (WebKit's PDF viewer stays on, see "PDF viewer"),
+`UC_WEBVIEW_CACHE_MODEL=viewer|browser|web-browser` (WebKit's cache model, default `browser`, see "Cache model and web
+processes (0.10.4)"), `G_MESSAGES_DEBUG=all`;
 WPEPlatform's `WPE_DRM_DEVICE`, `WPE_BUFFER_FORMAT`, `WPE_USE_EXPLICIT_SYNC`, `LIBGL_ALWAYS_SOFTWARE`; JavaScriptCore's
 `JavaScriptCoreUseJIT=0`.
 
@@ -1321,23 +1323,58 @@ leaves libinput's touchscreen hysteresis off (its margin is half the fuzz, libin
 1559-1563`), and Qt's evdev handler filters only with its `filtered` option (`qevdevtouchhandler.cpp:162-192`), so
 both read the same raw coordinates.
 
+### Cache model and web processes (0.10.4)
+
+`uc_webview_global_init()` sets WebKit's cache model to `WEBKIT_CACHE_MODEL_DOCUMENT_BROWSER` before anything creates
+the default `WebKitWebContext`. Up to 0.10.3 the library set none, and WPE WebKit uses `WEB_BROWSER` then
+(`LegacyGlobalSettings.h:65`, 2.54.3; the `DOCUMENT_BROWSER` default of `LegacyGlobalSettings.cpp:42-44` is Cocoa
+only). What the models change in WPE WebKit 2.54.3:
+
+| | `viewer` (`DOCUMENT_VIEWER`) | `browser` (`DOCUMENT_BROWSER`, the library's default) | `web-browser` (`WEB_BROWSER`, WebKit's default) |
+|---|---|---|---|
+| web process cache (`WebProcessCache.cpp:321-353`) | off | off | the process of a closed page, or of a page that went to another site, stays 5 min for a later load of that site (`WebProcessCache.cpp:47-53`); RAM / 256 MB processes, at most 32, none below 2 GB of RAM |
+| back/forward cache (`CacheModel.cpp:41-43, 62-69, 88-95`) | none | 2 pages | 2 pages |
+| memory cache of the web process (`CacheModel.cpp:44-60, 71-85, 97-119`; `WebProcessPoolGLib.cpp:221`) | disabled | 96 MB with 2 GB of RAM (64/32/16/8 MB below), 12..24 MB dead | 128 MB (96/64/32/16 MB below), 32..64 MB dead, decoded data dropped after 60 s |
+| disk cache of the network process (`CacheModel.cpp:128-173`) | none | 20..75 MB by free disk space | 100 MB..1 GB |
+
+The web process cache reads the model once, when the process pool is constructed (`WebProcessPool.cpp:261`,
+`WebProcessCache.cpp:79`); a later `webkit_web_context_set_cache_model()` changes only the back/forward cache and the
+processes' memory and disk caches (`WebProcessPool.cpp:1743-1751`). The model is a process-wide setting whose setter
+does not use its context argument (`WebKitWebContext.cpp:977-997`), so the library sets it with `NULL` first and
+checks it on the default context afterwards (a warning `WebKit did not take the cache model ...` otherwise). The start
+log has `ucwebview: WebKit cache model browser (default)`.
+
+With `browser` the web process of the last view ends when the view is freed (`WebProcessProxy.cpp:1805-1823`), and
+back and forward in a view still restore pages from the back/forward cache, also across sites, where the old page
+stays suspended in its own process (`WebProcessPool.cpp:2397-2401`). The memory and disk caches are smaller.
+
+`UC_WEBVIEW_CACHE_MODEL=viewer|browser|web-browser` (case-insensitive, read once by `uc_webview_global_init()`) picks
+another model, for measurements; another value is logged and ignored.
+
+WebKit's spare web process does not depend on the cache model, and the GLib API has no switch for it: at the first
+navigation that changes the process (another site) WebKit turns automatic prewarming on (`WebProcessPool.cpp:2266-2272`)
+and from then on starts one spare process whenever a main-frame load finishes (`WebPageProxy.cpp:9232-9233`,
+`WebProcessPool.cpp:1533-1546, 1116-1148`). It ends only under memory pressure (`WebProcessPool.cpp:1560-1572`) or,
+with the sandbox on, with an ephemeral session's store (`WebProcessPool.cpp:1462-1495`). So after a view went to
+another site, one web process stays when the last view is freed, also with `browser` (`--process-test`, `swap-close`).
+
 ### Memory with cross-site navigation (known limitation)
 
 One open page stays flat (12 h with a web view open). A view that navigates between
-sites grows: the library sets no cache model, so WebKit uses `WEB_BROWSER` (`LegacyGlobalSettings.h:65`, 2.54.2), and a
-navigation to a site reuses the web process that holds that site's suspended page (`WebProcessPool.cpp:1292`), so each
-site keeps one long-lived process in which older pages stay until memory pressure. In the 12 h soaks with three sites
-every 5 min the WPE processes grew 23.5 MB/h (Remote Two) and 44.8 MB/h (Remote 3) and the host 1.70-1.77 MB/h (about
-146 kB of heap per navigation), without a plateau. WebKit's own handler in the host releases it: at 90 % system memory
-use it drops the back/forward cache, the web process cache and the spare process (`WebProcessPool.cpp:1531-1549`; on a
+sites grew with `WEB_BROWSER` (0.10.3 and older): a navigation to a site reuses the web process that holds that site's
+suspended page (`WebProcessPool.cpp:1292`, 2.54.2) or the web process cache's process for it, so each site kept one
+long-lived process in which older pages stayed until memory pressure. In the 12 h soaks with three sites every 5 min
+the WPE processes grew 23.5 MB/h (Remote Two) and 44.8 MB/h (Remote 3) and the host 1.70-1.77 MB/h (about 146 kB of
+heap per navigation), without a plateau. WebKit's own handler in the host releases it: at 90 % system memory use it
+drops the back/forward cache, the web process cache and the spare process (`WebProcessPool.cpp:1531-1549`; on a
 Remote 3 MemAvailable 353 → 596 MB in 2 s). With `DOCUMENT_VIEWER` set before the process pool exists the host heap
-stays flat (+2.5 kB per navigation), which also shows that the frame and EGLImage handling does not leak.
+stays flat (+2.5 kB per navigation), which also shows that the frame and EGLImage handling does not leak. With
+`DOCUMENT_BROWSER` (0.10.4) there is no web process cache and a smaller memory cache; the back/forward cache keeps
+two pages as before. A soak with it is still to be done.
 
 Hosts can release that memory or start a visit with a fresh session with `uc_webview_global_clear_data(CACHE | ALL)`
-(0.8.0, see "Site settings (0.8.0)"): clearing the memory cache also drops suspended pages and cached processes.
-Choosing the cache model in `uc_webview_global_init()` before the process pool exists (`DOCUMENT_VIEWER` costs the
-back/forward cache and the memory and disk cache) is not implemented. An ephemeral session for the whole process is a
-host without a data directory (`create_session()`).
+(0.8.0, see "Site settings (0.8.0)"): clearing the memory cache also drops suspended pages and cached processes. An
+ephemeral session for the whole process is a host without a data directory (`create_session()`).
 
 ## What the logs carry
 
@@ -1474,6 +1511,7 @@ ucwebview-test --link-test [--link-variants still,moves,...] [--link-elements fr
 ucwebview-test --site-test [--site-tls-cert FILE] [--data-dir DIR [--site-expect-persisted]] [--site-steps ua,cookies,...]
 ucwebview-test --device-test [--timeout S]
 ucwebview-test --load-fail-test [--load-fail-tls-cert FILE] [--load-fail-steps dns,refused,...] [--load-fail-tls-hosts N]
+ucwebview-test --process-test [--process-wait S]
 ```
 
 - Creates an EGLDisplay on an EGL device (`EGL_EXT_platform_device`; prefers the device with a real render node, so
@@ -1756,8 +1794,23 @@ ucwebview-test --load-fail-test [--load-fail-tls-cert FILE] [--load-fail-steps d
   21 passed up to 0.10.2), else `FAILED` (1) or `TIMEOUT` (2, default 360 s). Without the network: `dns` passes with
   TEMPORARY_FAILURE as well. In every other mode the tool prints `load failed: <uri>: <REASON> (<domain> <code>, tls
   0x<flags>): <message>` before `load FAILED`.
+- `--process-test` (0.10.4, `ucwebview-test-process.c`): the web processes WebKit keeps with the library's cache model
+  (the one `UC_WEBVIEW_CACHE_MODEL` selects, see "Cache model and web processes (0.10.4)") and the back/forward cache
+  of one view, against a libsoup server inside the tool on `127.0.0.1` and `127.0.0.2` (two sites, so two web
+  processes). Each page puts in its title how its `pageshow` came (`a:load`, or `a:bfcache` from the back/forward
+  cache); the tool counts the `WPEWebProcess` processes below its own process in `/proc`. Steps: `close` (a view shows
+  page a and is freed: no web process left within `--process-wait` seconds, default 10, with `viewer` and `browser`;
+  exactly one with `web-browser` on a system with 2 GB of RAM or more, WebKit's web process cache), `back-forward` (a
+  new view shows a, then b of the other site, goes back and forward: both pages from the back/forward cache with
+  `browser` and `web-browser`, loaded again with `viewer`), `swap-close` (that view is freed: at most one web process
+  left with `viewer` and `browser`, WebKit's spare process). INFO lines give the counts; the first line names the
+  model, the RAM and whether the web process cache is on. Output with the default model on a build host:
+  `process-test: INFO back-forward: 3 web process(es) with page b (b, a spare, and a's suspended page unless viewer)`,
+  `process-test: INFO swap-close: 1 web process(es) 522 ms after uc_webview_free(), pids 6938`, at the end
+  `process-test: 7 passed, 0 failed: ok` (exit 0), else `FAILED` (1) or `TIMEOUT` (2, default 80 s).
 - Exit codes: 0 ok, 1 load failure / a refused URL / web process termination / IME mismatch / a zoom step that did not
-  render / a failed magnify, pinch, request, link, site or load failure check, 2 EGL failure or timeout, 3 usage.
+  render / a failed magnify, pinch, request, link, site, load failure or process check, 2 EGL failure or timeout, 3
+  usage.
 
 The PNG checksum comparison between the host and the device is a visual/perceptual one: the host renders with Skia
 on llvmpipe or in shared memory, the device with Skia on Panfrost, so the raw `sha256` values differ; the printed
@@ -1767,7 +1820,7 @@ size/fourcc/modifier and the PNG content are what to compare.
 
 ```shell
 cd lib
-make check                 # 176 GLib unit tests (events and the drag threshold, formats, IME state machine, EGL helpers,
+make check                 # 183 GLib unit tests (events and the drag threshold, formats, IME state machine, EGL helpers,
                            # URI allowlist and log redaction, refresh rate parsing/precedence/tick arithmetic, the vsync
                            # thread in real time, the input trace with a password session, the rendered and pinch lines,
                            # the ABI copy of the host's callback struct behind a guard page, the rendered request queue:
@@ -1798,7 +1851,9 @@ make check                 # 176 GLib unit tests (events and the drag threshold,
                            # when the host has WebKitGTK 2.54, WebKit's network error domain string
                            # (test-load-error.c), the 0.10.0 struct layout and a 0.9 host's struct behind a guard page
                            # (test-abi.c); 0.10.1: the origin-only log form of URIs and URIs inside messages, libsoup's
-                           # quoted redirect target, data: payloads (test-uri-policy.c)) + header C89/C++, and with
+                           # quoted redirect target, data: payloads (test-uri-policy.c); 0.10.4: the values of
+                           # UC_WEBVIEW_CACHE_MODEL, blanks, case, invalid values and the default
+                           # (test-cache-model.c)) + header C89/C++, and with
                            # Node the shim (16 tests,
                            # tests/test-device-shim.mjs)
 make check-js              # only the shim in Node's vm with a minimal DOM: one function expression that leaves only
@@ -1970,6 +2025,9 @@ ucwebview-test --device-test; echo $?                                  # one PAS
 # load failure reasons (0.10.0); site-test.pem as for --site-test
 ucwebview-test --load-fail-test --load-fail-tls-cert /tmp/site-test.pem; echo $?   # one PASS line per check, "load-fail-test: 22 passed, 0 failed, 0 skipped: ok", 0 (21 up to 0.10.2)
 ucwebview-test --load-fail-test --load-fail-tls-cert /tmp/site-test.pem --load-fail-steps tls-race; echo $?   # "PASS tls-race: ... 0 unexpected; ... N load(s) repeated after a cancellation", 0 (0.10.3; 0.10.2: FAIL, TIMEOUT details)
+# web processes and the cache model (0.10.4)
+ucwebview-test --process-test; echo $?                                 # "cache model browser, RAM N MiB (web process cache off)", "close: 0 web process(es) ...", back and forward "bfcache", "swap-close: 1 web process(es)" (the spare), "process-test: 7 passed, 0 failed: ok", 0
+UC_WEBVIEW_CACHE_MODEL=web-browser ucwebview-test --process-test; echo $?   # with 2 GB of RAM or more "web process cache on", "close: 1 web process(es) ...", ok, 0 (0.10.3 behaved like this)
 ucwebview-test http://www.example.invalid/ --frames 1; echo $?          # "load failed: http://www.example.invalid: HOST_NOT_FOUND (g-resolver-error-quark 0, tls 0x0): Error resolving ...", "load FAILED: ...", 1
 journalctl -u <host unit> -b | grep 'load failed'                   # "ucwebview: load failed: <uri>: <message> (<domain> <code>)"
 journalctl -u <host unit> -b | grep -E 'hidden pages throttled|device API'   # the start line ends "hidden pages throttled"; "device API on (...)" for a web view with device_api

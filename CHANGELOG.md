@@ -20,6 +20,18 @@ a patch release changes behaviour without a new export or type.
   with the library's default, so the page never waits for an answer nobody can give; log lines never show parts of
   the user info of a malformed URL.
 
+### Changed
+
+- libucwebview: the library sets WebKit's cache model to `DOCUMENT_BROWSER` (it set none, so WebKit used
+  `WEB_BROWSER`). WebKit's web process cache is off then: the web process of the last view now ends when the view is
+  freed, instead of staying (about 100 MB) for 5 minutes for a later page of the same site on a system with 2 GB of
+  RAM or more. Back and forward in a view still come from the back/forward cache (2 pages, as before); WebKit's memory
+  cache is smaller (96 instead of 128 MB with 2 GB of RAM) and its disk cache at most 75 MB instead of 1 GB. `UC_WEBVIEW_CACHE_MODEL=viewer|browser|web-browser` selects another
+  model; the start log names it. After a view went to another site, WebKit still keeps one spare web process when the
+  last view is freed: it does not depend on the cache model, and WebKit has no switch for it. No ABI change.
+- ucwebview-test: `--process-test` counts the web processes left after the last view is freed and checks back and
+  forward across two sites with the library's cache model; the distribution CI runs it with all three models.
+
 ## [0.10.3] - 2026-11-23
 
 ### Fixed

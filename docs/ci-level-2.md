@@ -37,8 +37,8 @@ containers on GitHub's hosted runners:
 5. runs `ucwebview-test --selftest`, renders a page in software (shared memory frames, `--egl none`) and runs the
    self-checking modes `--ime-test`, `--ime-swap-test`, `--dialog-test`, `--auth-test`, `--window-test`,
    `--download-test`, `--device-test`, `--link-test`, `--site-test` (with a self-signed certificate generated for the
-   run and a persistent data directory, twice), `--load-fail-test`, `--magnify`, `--pinch` (also with
-   `--prevent-touch`) and `--zoom-test`;
+   run and a persistent data directory, twice), `--load-fail-test`, `--process-test` (with each of the three
+   `UC_WEBVIEW_CACHE_MODEL` values), `--magnify`, `--pinch` (also with `--prevent-touch`) and `--zoom-test`;
 6. runs `wpe-launcher --headless` on WPE's headless platform and `wpe-launcher --version`.
 
 `--raf-test` is left out: it measures frame timing, which a shared CI machine does not keep. Distribution builds of

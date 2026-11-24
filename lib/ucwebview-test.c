@@ -41,7 +41,11 @@
  *   - checks the reason of failed loads, one load_failed_detail() right
  *     before each FAILED and none for loads without FAILED
  *     (--load-fail-test, library 0.10.0, ucwebview-test-loadfail.c); every
- *     mode prints the reason of a failed load ("load failed: ...").
+ *     mode prints the reason of a failed load ("load failed: ...");
+ *   - checks the web processes WebKit keeps after the last view is freed
+ *     with the library's cache model, and the back/forward cache of a view
+ *     across two sites (--process-test, library 0.10.4,
+ *     ucwebview-test-process.c).
  * Exit codes: 0 ok, 1 load/web process failure (also a URL the library
  * refuses to show: a download, a PDF), IME mismatch, a zoom step that did not
  * render, a failed magnify/pinch check, a failed request, link or IME swap test,
@@ -57,6 +61,7 @@
 #include "ucwebview-test-requests.h"
 #include "ucwebview-test-links.h"
 #include "ucwebview-test-ime.h"
+#include "ucwebview-test-process.h"
 #include "ucwebview-test-site.h"
 #include "ucwebview-test-device.h"
 #include "ucwebview-test-loadfail.h"
@@ -1437,6 +1442,7 @@ main (int argc, char **argv)
     g_option_context_add_main_entries (context, site_test_entries, NULL);
     g_option_context_add_main_entries (context, device_test_entries, NULL);
     g_option_context_add_main_entries (context, load_fail_test_entries, NULL);
+    g_option_context_add_main_entries (context, process_test_entries, NULL);
     if (!g_option_context_parse (context, &argc, &argv, &error)) {
         g_printerr ("ucwebview-test: %s\n", error->message);
         return 3;
@@ -1448,7 +1454,7 @@ main (int argc, char **argv)
     if (opt_selftest)
         return selftest ();
     if (!link_test_check_options () || !ime_swap_test_check_options () || !site_test_check_options ()
-        || !load_fail_test_check_options ())
+        || !load_fail_test_check_options () || !process_test_check_options ())
         return 3;
     if (opt_url == NULL && argc > 1)
         opt_url = g_strdup (argv[1]);
@@ -1456,7 +1462,8 @@ main (int argc, char **argv)
         return 3;
     if (opt_url == NULL && opt_html == NULL && !opt_ime_test && opt_raf_test == 0 && opt_zoom_test == NULL
         && opt_magnify == NULL && opt_pinch == NULL && !request_test_mode () && !link_test_mode ()
-        && !ime_swap_test_mode () && !site_test_mode () && !device_test_mode () && !load_fail_test_mode ()) {
+        && !ime_swap_test_mode () && !site_test_mode () && !device_test_mode () && !load_fail_test_mode ()
+        && !process_test_mode ()) {
         g_printerr ("%s", g_option_context_get_help (context, TRUE, NULL));
         return 3;
     }
@@ -1554,6 +1561,15 @@ main (int argc, char **argv)
         /* views of its own (ucwebview-test-loadfail.c) */
         int code = load_fail_test_run (width, height, opt_scale,
                                        opt_timeout > 0 ? opt_timeout : load_fail_test_default_timeout ());
+        uc_webview_global_shutdown ();
+        egl_teardown (&host);
+        g_option_context_free (context);
+        return code;
+    }
+    if (process_test_mode ()) {
+        /* views of its own (ucwebview-test-process.c) */
+        int code = process_test_run (width, height, opt_scale,
+                                     opt_timeout > 0 ? opt_timeout : process_test_default_timeout ());
         uc_webview_global_shutdown ();
         egl_teardown (&host);
         g_option_context_free (context);

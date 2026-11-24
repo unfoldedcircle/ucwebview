@@ -93,7 +93,7 @@ GMODULE_LIBS   = $(shell $(PKG_CONFIG) --libs gmodule-2.0)
 # GLib-only modules (host testable) and the WPE-dependent ones.
 PURE_SRCS = uc_events.c uc_formats.c uc_ime_state.c uc_egl.c uc_uri_policy.c uc_refresh.c uc_vsync.c uc_trace.c \
             uc_abi.c uc_rendered.c uc_pinch.c uc_magnify.c uc_pdf_policy.c uc_requests.c uc_headers.c uc_site.c uc_device.c \
-            uc_load_error.c
+            uc_load_error.c uc_cache_model.c
 WPE_SRCS  = uc_webview.c uc_wpe_display.c uc_wpe_screen.c uc_wpe_view.c uc_wpe_ime.c uc_wpe_gesture.c uc_requests_wk.c \
             uc_site_wk.c uc_device_wk.c uc_page_wk.c
 LIB_SRCS  = $(WPE_SRCS) $(PURE_SRCS)
@@ -102,7 +102,7 @@ EXT_HDRS  = uc_headers.h uc_ext_device.h uc_ext_protocol.h uc_device.h uc_device
 HEADERS   = uc_webview.h uc_internal.h uc_events.h uc_formats.h uc_ime_state.h uc_egl.h uc_uri_policy.h \
             uc_refresh.h uc_vsync.h uc_trace.h uc_abi.h uc_rendered.h uc_pinch.h uc_magnify.h uc_pdf_policy.h \
             uc_requests.h uc_requests_wk.h uc_headers.h uc_site.h uc_site_wk.h uc_device.h uc_device_wk.h uc_device_shim.h \
-            uc_page_wk.h uc_ext_protocol.h uc_ext_device.h uc_load_error.h
+            uc_page_wk.h uc_ext_protocol.h uc_ext_device.h uc_load_error.h uc_cache_model.h
 
 .PHONY: all lib check check-js check-asan syntax-check syntax-check-negative check-wpe-fake ucwebview-test-gtk install clean
 
@@ -143,11 +143,14 @@ $(EXTENSION): $(EXT_SRCS) $(EXT_HDRS)
 # in (GLib only) for the user agent token it expects (0.8.2).
 # --device-test (0.9.0) lives in ucwebview-test-device.c (pages from load_html(), no server).
 # --load-fail-test (0.10.0) lives in ucwebview-test-loadfail.c (a libsoup server, like the request modes).
+# --process-test (0.10.4) lives in ucwebview-test-process.c (a libsoup server); it compiles uc_cache_model.c in (GLib
+# only) to read UC_WEBVIEW_CACHE_MODEL like the library.
 TOOL_SRCS = ucwebview-test.c ucwebview-test-requests.c ucwebview-test-links.c ucwebview-test-ime.c ucwebview-test-site.c \
-            ucwebview-test-device.c ucwebview-test-loadfail.c uc_uri_policy.c uc_site.c
+            ucwebview-test-device.c ucwebview-test-loadfail.c ucwebview-test-process.c uc_uri_policy.c uc_site.c \
+            uc_cache_model.c
 TOOL_HDRS = ucwebview-test-requests.h ucwebview-test-links.h ucwebview-test-ime.h ucwebview-test-site.h \
-            ucwebview-test-device.h ucwebview-test-loadfail.h
-ucwebview-test: $(TOOL_SRCS) $(TOOL_HDRS) uc_webview.h uc_uri_policy.h uc_site.h $(SONAME)
+            ucwebview-test-device.h ucwebview-test-loadfail.h ucwebview-test-process.h
+ucwebview-test: $(TOOL_SRCS) $(TOOL_HDRS) uc_webview.h uc_uri_policy.h uc_site.h uc_cache_model.h $(SONAME)
 	$(CC) $(ALL_CFLAGS) $(HOST_CFLAGS) $(SOUP_CFLAGS) -o $@ $(TOOL_SRCS) -L. -lucwebview -Wl,-rpath-link,. $(ALL_LDFLAGS) \
 	    $(HOST_LIBS) $(SOUP_LIBS)
 
@@ -160,7 +163,7 @@ ucwebview.pc: ucwebview.pc.in
 TESTS = tests/test-events tests/test-formats tests/test-ime tests/test-egl tests/test-uri-policy \
         tests/test-refresh tests/test-vsync tests/test-trace tests/test-abi tests/test-rendered tests/test-pinch \
         tests/test-magnify tests/test-pdf-policy tests/test-requests tests/test-headers tests/test-site tests/test-device \
-        tests/test-load-error
+        tests/test-load-error tests/test-cache-model
 
 tests/test-events: tests/test-events.c uc_events.c uc_events.h uc_webview.h
 	$(CC) $(ALL_CFLAGS) $(TEST_CFLAGS) -I. -o $@ tests/test-events.c uc_events.c $(ALL_LDFLAGS) $(TEST_LIBS)
@@ -226,6 +229,10 @@ tests/test-device-asan: tests/test-device.c uc_device.c uc_device.h uc_device_sh
 tests/test-load-error: tests/test-load-error.c uc_load_error.c uc_load_error.h uc_webview.h
 	$(CC) $(ALL_CFLAGS) $(TEST_CFLAGS) $(GMODULE_CFLAGS) -I. -o $@ tests/test-load-error.c uc_load_error.c $(ALL_LDFLAGS) \
 	    $(TEST_LIBS) $(GMODULE_LIBS)
+
+# WebKit's cache model and UC_WEBVIEW_CACHE_MODEL (0.10.4).
+tests/test-cache-model: tests/test-cache-model.c uc_cache_model.c uc_cache_model.h
+	$(CC) $(ALL_CFLAGS) $(TEST_CFLAGS) -I. -o $@ tests/test-cache-model.c uc_cache_model.c $(ALL_LDFLAGS) $(TEST_LIBS)
 
 tests/test-abi: tests/test-abi.c uc_abi.c uc_abi.h uc_webview.h
 	$(CC) $(ALL_CFLAGS) $(TEST_CFLAGS) -I. -o $@ tests/test-abi.c uc_abi.c $(ALL_LDFLAGS) $(TEST_LIBS)

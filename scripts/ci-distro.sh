@@ -97,6 +97,7 @@ modes=${UC_SMOKE_MODES:-'--ime-test
 --site-test --site-tls-cert $cert --data-dir $data
 --site-test --site-tls-cert $cert --data-dir $data --site-expect-persisted
 --load-fail-test --load-fail-tls-cert $cert
+--process-test
 --magnify 2@100,700
 --pinch 100:250@240,400
 --pinch 100:250 --prevent-touch
@@ -109,6 +110,11 @@ while IFS= read -r line; do
 done <<EOF
 $modes
 EOF
+# the other cache models of UC_WEBVIEW_CACHE_MODEL (the default, browser, ran above)
+if [ -z "${UC_SMOKE_MODES:-}" ]; then
+    run env UC_WEBVIEW_CACHE_MODEL=viewer ucwebview-test --egl none --process-test </dev/null
+    run env UC_WEBVIEW_CACHE_MODEL=web-browser ucwebview-test --egl none --process-test </dev/null
+fi
 run env WPE_PLATFORM=headless wpe-launcher --headless --timeout 60 'data:text/html,<p>wpe-launcher</p>'
 run wpe-launcher --version
 
