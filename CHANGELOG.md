@@ -16,6 +16,9 @@ a patch release changes behaviour without a new export or type.
   [flutter-pi/PROTOCOL.md](flutter-pi/PROTOCOL.md), with golden byte files for contract tests. The plugin is built
   into flutter-pi (a CMake option patch) and `dlopen()`s the library; optional library functions are reported as
   features. No change to the library.
+  Requests (dialogs, logins) pending when the app stops listening, or whose event could not be sent, are answered
+  with the library's default, so the page never waits for an answer nobody can give; log lines never show parts of
+  the user info of a malformed URL.
 
 ## [0.10.3] - 2026-11-23
 

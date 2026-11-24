@@ -22,6 +22,7 @@ Protocol version: **1**.
 - [Requests in detail](#requests-in-detail)
 - [Frames, hold and pinch zoom](#frames-hold-and-pinch-zoom)
 - [Logging and secrets](#logging-and-secrets)
+- [Limits](#limits)
 - [Golden fixtures](#golden-fixtures)
 - [The Qt host and this protocol](#the-qt-host-and-this-protocol)
 
@@ -161,9 +162,12 @@ arguments listed and reply `noView` for an unknown one.
 
 - **Initialisation** happens once per process, at `initialize` or at the first `create`, `setCookies` or
   `clearData`. It sets up the GLib iteration and calls `uc_webview_global_init()` with flutter-pi's EGL display and
-  `UC_WEBVIEW_DATA_DIR`. A refresh rate given to the first of these calls goes to the library before the
-  initialisation: WebKit takes its nominal frame rate once, at the first page load (pass
-  `View.of(context).display.refreshRate`). `dragThreshold` is the touch distance in view pixels from which WebKit
+  `UC_WEBVIEW_DATA_DIR`. The `refreshRate` of `initialize` and `create` goes to the library
+  (`uc_webview_global_set_refresh_rate()`) until the first page load was asked for (a `create` with `url`, `loadUri`,
+  `loadHtml`, `reload`, `goBack`, `goForward`), before or after the initialisation, whichever call initialised the
+  library: WebKit takes its nominal frame rate once, at the first page load of the process (pass
+  `View.of(context).display.refreshRate`). Later only `setRefreshRate` passes a rate; it changes the library's tick
+  rate at once, not WebKit's nominal rate. `dragThreshold` is the touch distance in view pixels from which WebKit
   scrolls instead of tapping: a host that tells taps from drags itself (the keyboard on a tap into a focused field)
   uses it. `setRefreshRate`, `setColorScheme`, `setTlsErrorsPolicy` and `allowCertificate` may come before the
   initialisation; the library keeps the values.
@@ -289,8 +293,8 @@ time slept. See the package README of the library, "Device state for web pages".
 
 | Method | |
 |---|---|
-| `listen` | events are sent from now on (Dart: the first `receiveBroadcastStream().listen()`) |
-| `cancel` | events are dropped from now on; requests that arrive meanwhile get their defaults |
+| `listen` | events are sent from now on (Dart: the first `receiveBroadcastStream().listen()`); arguments are ignored |
+| `cancel` | events are dropped from now on; every pending request gets its default at once, and requests that arrive meanwhile too |
 
 ## Events
 
@@ -346,7 +350,10 @@ open.
   credentials (kept for the process only, never logged); `user` null continues without them and the server's 401
   page loads. Rejected credentials bring a new `authenticate` with `retry: true`.
 - **Defaults without the app** (as remote-ui's item does): while nobody listens on the event channel, a dialog is
-  answered at once with "no", the leave-page question with "leave", a login without credentials.
+  answered at once with "no", the leave-page question with "leave", a login without credentials. The same happens to
+  every request still pending when the listener cancels (no `requestCancelled` follows: nobody listens), and to a
+  request whose event could not be sent (no memory): the page never waits for an answer nobody can give. Each counts
+  in `requestsDefaulted`.
 - **Leave-page question and navigation**: when the app calls `loadUri`, `loadHtml`, `reload`, `goBack` or
   `goForward` while the question is pending, the plugin answers it "leave" first (the user goes elsewhere), for
   `stop` "stay", and sends `requestCancelled` with `reason: "navigation"`. The library would otherwise answer
@@ -385,8 +392,26 @@ shown. The hold exists for pinch zoom:
 
 The plugin's log lines (`[uc_webview] ...` on stderr) carry the origin of a URL at most (`scheme://host[:port]`),
 never its path, query, fragment or user info, and never header values, cookie values, user names, passwords, typed
-text or dialog texts. Secrets in received messages (passwords, header values, cookie values) are overwritten in the
-plugin's memory once passed to the library. The Dart side keeps the same rule for its own logs.
+text or dialog texts. A URL whose user info is not clearly delimited (an `@` after the first `/`, `?`, `#` or `\`,
+as in `https://user:pa/ss@host/`), or whose authority is no `host[:port]`, is logged as `(invalid)`; so is a URL with
+an `@` in its path or query. The Dart side keeps the same rule for its own logs.
+
+What is wiped in memory: the plugin's own copies of `replyAuth`'s `password`, `setOriginHeaders`' header values and
+`setCookies`' cookie values are overwritten before they are freed (also when a later argument of the call is
+invalid). Not wiped: the engine's buffers of the platform messages (flutter-pi frees them), the copies the library
+and WebKit keep, and other strings such as `replyAuth`'s `user`, `replyDialog`'s `text` and the text input of
+`imeCommit`/`imePreedit`.
+
+## Limits
+
+- The plugin does not call `uc_webview_global_shutdown()` when flutter-pi exits: views are freed, WebKit's helper
+  processes exit with the last view, and the process ends right after (as remote-ui).
+- Frames are shown without an explicit GPU fence: the library hands over a DMA-BUF frame once WebKit's rendering is
+  complete, and the engine samples it as remote-ui's scene graph does (implicit synchronisation of the DMA-BUF).
+- A file descriptor GLib polls that epoll refuses (a regular file, `EPERM`) is polled on every GLib iteration (logged
+  once); an epoll entry that cannot be removed or changed makes the plugin rebuild its epoll set (`glibEpollRebuilds`
+  in `stats`), a few system calls per rebuild.
+- Requests of the page reach the app only while it listens on the event channel.
 
 ## Golden fixtures
 
