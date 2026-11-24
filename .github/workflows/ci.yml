@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Unfolded Circle ApS
 #
-# Level 1 (jobs unit, syntax, lint) runs on GitHub-hosted runners without WPE WebKit: the GLib unit tests, the
-# sanitizer build, a syntax check of every WPE source against the headers of the official WPE WebKit release tarball,
-# and the lints. Level 2 (job distro) builds, installs and runs the library and the launcher against the WPE WebKit
-# of a rolling distribution in a container, see docs/ci-level-2.md. Set the repository variable CI_DISTRO_BUILD to
-# "false" to skip level 2.
+# Level 1 (jobs unit, syntax, flutter-pi, lint) runs on GitHub-hosted runners without WPE WebKit: the GLib unit tests
+# (the flutter-pi plugin's against a fake libucwebview), the sanitizer build, a syntax check of every WPE source
+# against the headers of the official WPE WebKit release tarball, flutter-pi built with the plugin at the pinned
+# commit, and the lints. Level 2 (job distro) builds, installs and runs the library and the launcher against the WPE
+# WebKit of a rolling distribution in a container, see docs/ci-level-2.md. Set the repository variable CI_DISTRO_BUILD
+# to "false" to skip level 2.
 name: CI
 
 on:
@@ -69,6 +70,10 @@ jobs:
 
       - name: flutter-pi plugin unit tests with ASan and UBSan
         run: make -C flutter-pi check-asan
+
+      - name: flutter-pi plugin protocol fixtures match their generator
+        if: matrix.cc == 'gcc'
+        run: make -C flutter-pi check-fixtures
 
   syntax:
     name: Syntax check against WPE WebKit headers

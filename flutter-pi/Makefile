@@ -7,6 +7,7 @@
 #                         GLib loop test (GLib and libsystemd)
 #   make check-asan       the same with AddressSanitizer and UBSan
 #   make fixtures         regenerates tests/fixtures/ with tests/fixtures/gen-fixtures.py (python3)
+#   make check-fixtures   fails when tests/fixtures/ differs from what gen-fixtures.py writes
 #   make flutter-pi-build FLUTTER_PI_SRC=<flutter-pi checkout>
 #                         builds flutter-pi with the plugin on the host (scripts/build-flutter-pi.sh)
 #   make clean
@@ -53,7 +54,7 @@ CFLAGS_test-glib-loop = $(SD_CFLAGS)
 FLUTTER_PI_SRC   ?=
 FLUTTER_PI_BUILD ?= $(CURDIR)/.cache/flutter-pi-build
 
-.PHONY: check check-asan fixtures flutter-pi-build clean
+.PHONY: check check-asan fixtures check-fixtures flutter-pi-build clean
 
 .SECONDEXPANSION:
 $(TESTS): tests/test-%: $$(SRC_test-%) $(CORE_HDRS) flutterpi/ucfp_glib_loop.h
@@ -85,6 +86,11 @@ check-asan: $(addsuffix -asan,$(TESTS)) $(FAKES)
 
 fixtures:
 	$(PYTHON) tests/fixtures/gen-fixtures.py tests/fixtures
+
+check-fixtures:
+	rm -rf .cache/fixtures && mkdir -p .cache/fixtures
+	$(PYTHON) tests/fixtures/gen-fixtures.py .cache/fixtures
+	diff -r --exclude=gen-fixtures.py tests/fixtures .cache/fixtures
 
 flutter-pi-build:
 	@test -n "$(FLUTTER_PI_SRC)" || { echo "set FLUTTER_PI_SRC to a flutter-pi checkout"; exit 1; }

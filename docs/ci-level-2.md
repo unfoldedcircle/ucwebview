@@ -1,8 +1,9 @@
 # CI level 2: build, link and run against WPE WebKit
 
-Level 1 of the CI (jobs `unit`, `syntax`, `lint` in [.github/workflows/ci.yml](../.github/workflows/ci.yml)) needs no
-WPE WebKit: it compiles every WPE source with `-fsyntax-only` against headers generated from the release tarball, but
-it neither links the library nor runs it. Level 2 does: it builds `lib/` and `launcher/` against a real WPE WebKit,
+Level 1 of the CI (jobs `unit`, `syntax`, `flutter-pi`, `lint` in [.github/workflows/ci.yml](../.github/workflows/ci.yml))
+needs no WPE WebKit: it compiles every WPE source with `-fsyntax-only` against headers generated from the release
+tarball, tests the flutter-pi plugin against a fake library and builds it into flutter-pi, but it neither links the
+library nor runs it. Level 2 does: it builds `lib/` and `launcher/` against a real WPE WebKit,
 installs them and runs `ucwebview-test` and `wpe-launcher` on it.
 
 ## Which distributions ship WPE WebKit with WPEPlatform
