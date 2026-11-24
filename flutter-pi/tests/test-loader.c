@@ -3,8 +3,9 @@
  * Copyright (c) 2026 Unfolded Circle ApS
  *
  * Host unit test of core/ucfl_loader.c (GLib's test framework only) against the fakes of tests/fake-ucwebview.c,
- * whose paths the Makefile passes: a missing library, one of another API version, one without a required function
- * and one without the optional functions give "unavailable" or fewer features, never a crash.
+ * whose paths the Makefile passes: a missing library, one of another API version, one without a required function,
+ * one without the optional functions and one with an incomplete feature give "unavailable" or fewer features, never a
+ * crash.
  */
 #include "ucfl_loader.h"
 
@@ -37,12 +38,16 @@ static void test_complete(void)
     g_assert_cmpint(lib.global_set_refresh_rate(48.61), ==, 0);
     g_assert_cmpstr(lib.library_version(), ==, "9.9.9-fake");
     g_assert_nonnull(lib.create(1, 1, NULL, NULL));
-    g_assert_cmpuint(lib.features, ==, UCFL_FEATURE_REFRESH_RATE | UCFL_FEATURE_NEW_SIZED | UCFL_FEATURE_DEVICE_API);
+    g_assert_cmpuint(lib.features, ==, (1u << UCFL_FEATURE_COUNT) - 1);
     n = ucfl_feature_names(lib.features, names, G_N_ELEMENTS(names));
-    g_assert_cmpuint(n, ==, 3);
+    g_assert_cmpuint(n, ==, UCFL_FEATURE_COUNT);
     g_assert_cmpstr(names[0], ==, "refreshRate");
-    g_assert_cmpstr(names[1], ==, "newSized");
-    g_assert_cmpstr(names[2], ==, "deviceApi");
+    g_assert_cmpstr(names[4], ==, "pinchZoom");
+    g_assert_cmpstr(names[5], ==, "requests");
+    g_assert_cmpstr(names[UCFL_FEATURE_COUNT - 1], ==, "deviceApi");
+    g_assert_cmpstr(ucfl_feature_name(UCFL_FEATURE_COOKIES), ==, "cookies");
+    g_assert_null(ucfl_feature_name(UCFL_FEATURE_COOKIES | UCFL_FEATURE_USER_AGENT));
+    g_assert_null(ucfl_feature_name(0));
     g_assert_cmpuint(ucfl_feature_names(lib.features, names, 1), ==, 1);
 }
 
@@ -55,7 +60,28 @@ static void test_old(void)
     g_assert_null(lib.create_sized);
     g_assert_null(lib.global_set_refresh_rate);
     g_assert_null(lib.library_version);
+    g_assert_null(lib.request_reply);
+    g_assert_nonnull(lib.load_html); /* required */
     g_assert_cmpuint(lib.features, ==, 0);
+}
+
+/* the device API needs all three functions, as remote-ui's WebViewLibrary::deviceApiAvailable() */
+static void test_partial_feature(void)
+{
+    struct ucfl_lib lib;
+    char reason[256];
+
+    g_assert_true(ucfl_lib_load(&lib, FAKE_DIR "/fake-no-device-state.so", reason, sizeof(reason)));
+    g_assert_nonnull(lib.set_device_api);
+    g_assert_null(lib.set_device_state);
+    g_assert_false(lib.features & UCFL_FEATURE_DEVICE_API);
+    g_assert_true(lib.features & UCFL_FEATURE_REQUESTS);
+
+    /* the composite features need every part */
+    lib.create_sized = NULL;
+    g_assert_false(ucfl_lib_features(&lib) & UCFL_FEATURE_PINCH_ZOOM);
+    g_assert_false(ucfl_lib_features(&lib) & UCFL_FEATURE_REQUESTS);
+    g_assert_true(ucfl_lib_features(&lib) & UCFL_FEATURE_WHEN_RENDERED);
 }
 
 static void test_other_api_version(void)
@@ -89,6 +115,7 @@ int main(int argc, char **argv)
     g_test_add_func("/loader/missing", test_missing);
     g_test_add_func("/loader/complete", test_complete);
     g_test_add_func("/loader/old", test_old);
+    g_test_add_func("/loader/partial-feature", test_partial_feature);
     g_test_add_func("/loader/other-api-version", test_other_api_version);
     g_test_add_func("/loader/incomplete", test_incomplete);
     return g_test_run();
