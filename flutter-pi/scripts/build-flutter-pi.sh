@@ -36,8 +36,10 @@ fi
 for patch in "$here"/patches/*.patch; do
     patch -d "$out/flutter-pi" -p1 --forward --quiet < "$patch"
 done
-cp -a "$here" "$out/flutter-pi/src/plugins/uc_webview"
-rm -rf "$out/flutter-pi/src/plugins/uc_webview/.cache"
+# the plugin without its host tests and build products (the build directory may be inside it: .cache/)
+mkdir -p "$out/flutter-pi/src/plugins/uc_webview"
+tar -C "$here" --exclude=./.cache --exclude=./tests -cf - . |
+    tar -C "$out/flutter-pi/src/plugins/uc_webview" -xf -
 cp "$here/../lib/uc_webview.h" "$out/flutter-pi/src/plugins/uc_webview/core/"
 
 cmake -S "$out/flutter-pi" -B "$out/build" -DCMAKE_BUILD_TYPE=Debug -DBUILD_UC_WEBVIEW_PLUGIN=ON \

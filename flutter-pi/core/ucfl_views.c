@@ -21,10 +21,8 @@ void ucfl_views_free(struct ucfl_views *views)
     memset(views, 0, sizeof(*views));
 }
 
-int64_t ucfl_views_add(struct ucfl_views *views, void *data)
+static int grow(struct ucfl_views *views)
 {
-    if (!data)
-        return -1;
     if (views->count == views->capacity) {
         size_t capacity = views->capacity ? views->capacity * 2 : 4;
         struct ucfl_view_slot *slots = realloc(views->slots, capacity * sizeof(*slots));
@@ -33,10 +31,29 @@ int64_t ucfl_views_add(struct ucfl_views *views, void *data)
         views->slots = slots;
         views->capacity = capacity;
     }
+    return 0;
+}
+
+int64_t ucfl_views_add(struct ucfl_views *views, void *data)
+{
+    if (!data || grow(views) != 0)
+        return -1;
     views->slots[views->count].id = ++views->last_id;
     views->slots[views->count].data = data;
     views->count++;
     return views->last_id;
+}
+
+int ucfl_views_insert(struct ucfl_views *views, int64_t id, void *data)
+{
+    if (!data || id <= 0 || ucfl_views_get(views, id) || grow(views) != 0)
+        return -1;
+    views->slots[views->count].id = id;
+    views->slots[views->count].data = data;
+    views->count++;
+    if (id > views->last_id)
+        views->last_id = id;
+    return 0;
 }
 
 void *ucfl_views_get(const struct ucfl_views *views, int64_t id)

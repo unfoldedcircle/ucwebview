@@ -28,6 +28,9 @@ void ucfl_views_init(struct ucfl_views *views);
 void ucfl_views_free(struct ucfl_views *views);
 /* Adds data (not NULL) under a new id; returns the id, or -1 without memory. */
 int64_t ucfl_views_add(struct ucfl_views *views, void *data);
+/* Adds data (not NULL) under id (> 0, not in the table): a second table that mirrors another one's ids. 0, or -1 for
+ * an invalid or present id or without memory. Later ucfl_views_add() ids stay above id. */
+int ucfl_views_insert(struct ucfl_views *views, int64_t id, void *data);
 /* The data of id, NULL for an unknown id. */
 void *ucfl_views_get(const struct ucfl_views *views, int64_t id);
 /* Removes id and returns its data, NULL for an unknown id. */

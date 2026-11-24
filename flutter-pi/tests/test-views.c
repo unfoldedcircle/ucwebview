@@ -29,6 +29,17 @@ static void test_ids(void)
     g_assert_cmpuint(views.count, ==, 22);
     g_assert_null(ucfl_views_get(&views, 0));
     ucfl_views_free(&views);
+
+    /* a mirror of another table's ids */
+    ucfl_views_init(&views);
+    g_assert_cmpint(ucfl_views_insert(&views, 5, &a), ==, 0);
+    g_assert_cmpint(ucfl_views_insert(&views, 5, &b), ==, -1); /* present */
+    g_assert_cmpint(ucfl_views_insert(&views, 0, &b), ==, -1);
+    g_assert_cmpint(ucfl_views_insert(&views, 2, NULL), ==, -1);
+    g_assert_cmpint(ucfl_views_insert(&views, 2, &b), ==, 0);
+    g_assert_true(ucfl_views_get(&views, 5) == &a);
+    g_assert_cmpint(ucfl_views_add(&views, &c), ==, 6);
+    ucfl_views_free(&views);
 }
 
 int main(int argc, char **argv)

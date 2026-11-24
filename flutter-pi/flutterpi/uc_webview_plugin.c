@@ -3,8 +3,13 @@
  * Copyright (c) 2026 Unfolded Circle ApS
  *
  * flutter-pi plugin "uc_webview": web views of libucwebview shown as flutter-pi textures and driven over the
- * uc.webview channels (core/ucfl_protocol.h). Built into flutter-pi from src/plugins/uc_webview with the CMake option
- * BUILD_UC_WEBVIEW_PLUGIN (README.md); the library itself is dlopen()ed on the first hello.
+ * uc.webview channels (PROTOCOL.md). Built into flutter-pi from src/plugins/uc_webview with the CMake option
+ * BUILD_UC_WEBVIEW_PLUGIN (README.md); the library itself is dlopen()ed on the first call that needs it.
+ *
+ * The protocol, the library, the views and the page's requests are the host-neutral core's (core/ucfl_host.h); this
+ * file is the flutter-pi adapter: the channels (raw platform messages, replies through their response handles, also
+ * later for the replies that wait for the library), GLib's main context on the platform thread (ucfp_glib_loop.c),
+ * and one "surface" per view: a flutter-pi texture and the frames in flight.
  *
  * Threads
  *  - Platform thread (flutter-pi's sd_event loop): the channel handlers, every libucwebview call, the library's
@@ -58,6 +63,7 @@
 
 #include "ucfl_codec.h"
 #include "ucfl_dump.h"
+#include "ucfl_host.h"
 #include "ucfl_loader.h"
 #include "ucfl_pacing.h"
 #include "ucfl_protocol.h"
@@ -75,11 +81,12 @@ struct done {
     bool released;
 };
 
+/* the surface of a view (struct ucfl_host_ops) */
 struct view {
     struct plugin *plugin;
     int64_t id;
-    int refs;        /* platform thread: the view table's and one per frame not yet released */
-    uc_webview *wv;  /* NULL once disposed */
+    int refs;        /* platform thread: the surface table's and one per frame not yet released */
+    uc_webview *wv;  /* NULL once the view is disposed */
     struct texture *texture;
     int frame_width, frame_height; /* of the last frame event */
     bool frame_zero_copy, had_frame;
@@ -104,12 +111,10 @@ struct frame {
 struct plugin {
     struct flutterpi *flutterpi;
 
-    struct ucfl_lib lib;
-    bool probed, loaded, initialized;
-    char reason[512]; /* why the web view is unavailable */
+    struct ucfl_host *host;
+    const struct ucfl_lib *lib; /* set with the first surface: the library is loaded by then */
     struct ucfp_glib_loop *glib;
-    struct ucfl_views views;
-    bool listening; /* the event channel has a listener */
+    struct ucfl_views views; /* the surfaces by view id */
 
     struct gl_renderer *renderer; /* NULL: flutter-pi renders without OpenGL ES */
     EGLDisplay egl_display;
@@ -138,19 +143,25 @@ static struct plugin plugin_instance;
 
 /* ---- helpers ------------------------------------------------------------- */
 
-static void respond(const FlutterPlatformMessage *message, const struct ucfl_writer *w)
+static void log_line(void *ctx, const char *line)
 {
-    if (!message->response_handle)
-        return;
-    /* without memory: the empty reply, which Dart reports as MissingPluginException, rather than none */
-    flutterpi_respond_to_platform_message(message->response_handle, w->failed ? NULL : w->data, w->failed ? 0 : w->size);
+    (void) ctx;
+    LOG("%s", line);
 }
 
-static void send_event(struct plugin *p, struct ucfl_writer *w)
+/* ucfl_host_ops.respond: token is the message's response handle; the engine takes a late answer as well */
+static void respond(void *ctx, void *token, const uint8_t *data, size_t size)
 {
-    if (p->listening && !w->failed)
-        flutterpi_send_platform_message(p->flutterpi, UCFL_CHANNEL_EVENTS, w->data, w->size, NULL);
-    ucfl_writer_free(w);
+    (void) ctx;
+    if (token)
+        flutterpi_respond_to_platform_message(token, data, size);
+}
+
+/* ucfl_host_ops.send_event */
+static void send_event(void *ctx, const uint8_t *data, size_t size)
+{
+    struct plugin *p = ctx;
+    flutterpi_send_platform_message(p->flutterpi, UCFL_CHANNEL_EVENTS, data, size, NULL);
 }
 
 static void view_unref(struct view *view)
@@ -383,7 +394,7 @@ static int on_done(sd_event_source *source, int fd, uint32_t revents, void *user
         if (view->latest == frame)
             view->latest = NULL;
         if (view->wv)
-            p->lib.frame_release(view->wv, frame->f.handle);
+            p->lib->frame_release(view->wv, frame->f.handle);
         if (frame->texture) {
             if (!switched) {
                 switched = true;
@@ -614,7 +625,7 @@ static void release_unshown(struct view *view, struct frame *frame)
     struct plugin *p = view->plugin;
 
     if (view->wv)
-        p->lib.frame_release(view->wv, frame->f.handle);
+        p->lib->frame_release(view->wv, frame->f.handle);
     p->frames_released++;
     view_unref(view);
     free(frame);
@@ -626,7 +637,7 @@ static void report_rendered(struct view *view, struct frame *frame)
         return;
     frame->rendered = true;
     if (view->wv) {
-        view->plugin->lib.frame_rendered(view->wv, frame->f.handle);
+        view->plugin->lib->frame_rendered(view->wv, frame->f.handle);
         view->reported_ns = now_ns();
     }
 }
@@ -643,7 +654,7 @@ static bool push_frame(struct view *view, struct frame *frame)
         struct ucfl_writer w;
         ucfl_writer_init(&w);
         ucfl_put_event_frame(&w, view->id, f->width, f->height, zero_copy);
-        send_event(p, &w);
+        ucfl_host_send_event(p->host, &w);
         view->had_frame = true;
         view->frame_width = f->width;
         view->frame_height = f->height;
@@ -677,16 +688,17 @@ static void apply_pace(struct view *view, struct ucfl_pace pace)
         report_rendered(view, pace.rendered);
 }
 
-/* ---- platform thread: the library's callbacks (from the GLib dispatch) ----- */
+/* ---- platform thread: the surfaces (struct ucfl_host_ops) ------------------------- */
 
-static void on_frame_ready(uc_webview *wv, const uc_webview_frame *f, void *user)
+/* surface_frame: frame_ready() of the view's library callback, from the GLib dispatch */
+static void surface_frame(void *ctx, void *surface, const uc_webview_frame *f)
 {
-    struct view *view = user;
-    struct plugin *p = view->plugin;
+    struct plugin *p = ctx;
+    struct view *view = surface;
     struct frame *frame = calloc(1, sizeof(*frame));
 
     if (!frame) {
-        p->lib.frame_release(wv, f->handle);
+        p->lib->frame_release(view->wv, f->handle);
         return;
     }
     frame->view = view;
@@ -705,181 +717,92 @@ static void on_frame_ready(uc_webview *wv, const uc_webview_frame *f, void *user
         p->frames_held++;
 }
 
-static void on_load_changed(uc_webview *wv, int event, const char *uri, void *user)
+/* surface_hold: setFrameHold */
+static void surface_hold(void *ctx, void *surface, bool hold)
 {
-    struct view *view = user;
-    struct ucfl_writer w;
+    struct view *view = surface;
 
-    (void) wv;
-    ucfl_writer_init(&w);
-    ucfl_put_event_load_changed(&w, view->id, event, uri);
-    send_event(view->plugin, &w);
+    (void) ctx;
+    if (hold != view->pacer.hold)
+        apply_pace(view, ucfl_pacer_set_hold(&view->pacer, hold));
 }
 
-static void on_progress_changed(uc_webview *wv, double progress, void *user)
+/* surface_new: a flutter-pi texture for the view */
+static int surface_new(void *ctx, int64_t view_id, uc_webview *wv, double refresh_rate, int64_t *texture_id,
+                       void **surface)
 {
-    struct view *view = user;
-    struct ucfl_writer w;
+    struct plugin *p = ctx;
+    struct view *view = calloc(1, sizeof(*view));
 
-    (void) wv;
-    ucfl_writer_init(&w);
-    ucfl_put_event_progress(&w, view->id, progress);
-    send_event(view->plugin, &w);
-}
-
-static void on_web_process_terminated(uc_webview *wv, int reason, void *user)
-{
-    struct view *view = user;
-    struct ucfl_writer w;
-
-    (void) wv;
-    LOG("view %lld: web process terminated (%s)", (long long) view->id, ucfl_termination_name(reason));
-    ucfl_writer_init(&w);
-    ucfl_put_event_terminated(&w, view->id, reason);
-    send_event(view->plugin, &w);
-}
-
-/* ---- platform thread: the channels ---------------------------------------- */
-
-static bool ensure_library(struct plugin *p)
-{
-    const char *path = getenv("UC_WEBVIEW_LIBRARY"); /* a test build of the library; default the installed one */
-
-    if (p->probed)
-        return p->loaded;
-    p->probed = true;
-    if (!p->renderer) {
-        snprintf(p->reason, sizeof(p->reason), "flutter-pi renders without OpenGL ES: web views need GL textures");
-    } else if (!p->image_target_texture) {
-        snprintf(p->reason, sizeof(p->reason), "glEGLImageTargetTexture2DOES is missing");
-    } else {
-        p->loaded = ucfl_lib_load(&p->lib, path && *path ? path : UC_WEBVIEW_SONAME, p->reason, sizeof(p->reason));
-    }
-    if (p->loaded)
-        LOG("web view available: libucwebview API %d, %s frame pacing", UC_WEBVIEW_API_VERSION,
-            ucfl_pacing_name(p->pacing));
-    else
-        LOG("web view unavailable: %s", p->reason);
-    return p->loaded;
-}
-
-static bool ensure_initialized(struct plugin *p, double refresh_rate)
-{
-    const char *data_dir = getenv("UC_WEBVIEW_DATA_DIR");
-
-    if (p->initialized)
-        return true;
-    if (!p->glib) {
-        p->glib = ucfp_glib_loop_new(flutterpi_sd_event_add_io, flutterpi_post_platform_task, p->reason,
-                                     sizeof(p->reason));
-        if (!p->glib)
-            return false;
-    }
-    /* before the first load of the process: WebKit takes its nominal frame rate from it once */
-    if (refresh_rate > 0 && p->lib.global_set_refresh_rate && p->lib.global_set_refresh_rate(refresh_rate) != 0)
-        LOG("the library refused the refresh rate %.2f Hz", refresh_rate);
-    if (p->lib.global_init(p->egl_display, data_dir && *data_dir ? data_dir : NULL, NULL) != 0) {
-        snprintf(p->reason, sizeof(p->reason), "uc_webview_global_init failed");
-        return false;
-    }
-    p->initialized = true;
-    LOG("web view initialised with flutter-pi's EGL display and %s", data_dir && *data_dir ? "persistent website data"
-                                                                                           : "an ephemeral session");
-    return true;
-}
-
-static void handle_hello(struct plugin *p, struct ucfl_writer *w)
-{
-    const char *names[UCFL_FEATURE_COUNT];
-    bool available = ensure_library(p);
-    struct ucfl_hello hello = {
-        .available = available,
-        .reason = available ? NULL : p->reason,
-        .library = available && p->lib.library_version ? p->lib.library_version() : NULL,
-        .abi = available ? p->lib.api_version() : -1,
-        .features = names,
-        .n_features = available ? ucfl_feature_names(p->lib.features, names, UCFL_FEATURE_COUNT) : 0,
-    };
-    ucfl_put_hello_reply(w, &hello);
-}
-
-static void handle_create(struct plugin *p, const struct ucfl_call *call, struct ucfl_writer *w)
-{
-    uc_webview_callbacks cb = { 0 };
-    struct view *view;
-    int width = call->create.width, height = call->create.height;
-    int64_t id;
-
-    if (!ensure_library(p)) {
-        ucfl_put_error_envelope(w, "unavailable", p->reason);
-        return;
-    }
-    if (!ensure_initialized(p, call->create.refresh_rate)) {
-        ucfl_put_error_envelope(w, "failed", p->reason);
-        return;
-    }
-    view = calloc(1, sizeof(*view));
-    if (!view) {
-        ucfl_put_error_envelope(w, "failed", "out of memory");
-        return;
-    }
+    if (!view)
+        return -1;
     view->plugin = p;
+    view->id = view_id;
+    view->wv = wv;
     view->refs = 1;
     ucfl_pacer_init(&view->pacer, p->pacing);
-    ucfl_frame_clock_init(&view->clock, call->create.refresh_rate);
+    ucfl_frame_clock_init(&view->clock, refresh_rate);
     view->texture = flutterpi_create_texture(p->flutterpi);
-    id = view->texture ? ucfl_views_add(&p->views, view) : -1;
-    if (id < 0) {
-        if (view->texture)
-            texture_destroy(view->texture);
+    if (!view->texture) {
         free(view);
-        ucfl_put_error_envelope(w, "failed", "no texture or out of memory");
-        return;
+        return -1;
     }
-    view->id = id;
-
-    cb.frame_ready = on_frame_ready;
-    cb.load_changed = on_load_changed;
-    cb.progress_changed = on_progress_changed;
-    cb.web_process_terminated = on_web_process_terminated;
-    view->wv = p->lib.create_sized ? p->lib.create_sized(width, height, &cb, sizeof(cb), view)
-                                   : p->lib.create(width, height, &cb, view);
-    if (!view->wv) {
-        ucfl_views_remove(&p->views, id);
+    /* the surfaces keep the core's ids, for the stats and the frame dumps */
+    if (ucfl_views_insert(&p->views, view_id, view) != 0) {
         texture_destroy(view->texture);
         free(view);
-        ucfl_put_error_envelope(w, "failed", "uc_webview_new failed");
-        return;
+        return -1;
     }
-    if (call->create.pixel_ratio > 0)
-        p->lib.set_scale(view->wv, call->create.pixel_ratio);
-    if (call->create.url && *call->create.url)
-        p->lib.load_uri(view->wv, call->create.url);
-    LOG("view %lld: %dx%d, texture %lld", (long long) id, width, height, (long long) texture_get_id(view->texture));
-    ucfl_put_create_reply(w, id, texture_get_id(view->texture));
+    p->lib = ucfl_host_lib(p->host);
+    *texture_id = texture_get_id(view->texture);
+    *surface = view;
+    return 0;
 }
 
-static void dispose_view(struct plugin *p, struct view *view)
+/* surface_free: right before uc_webview_free(), which releases the frames the plugin still holds */
+static void surface_free(void *ctx, void *surface)
 {
-    /* the texture first: afterwards the engine fetches none of its frames, so none is bound after the library freed
-     * the EGLImages; a frame the engine still shows keeps its texture (an EGLImage's siblings outlive the image) */
+    struct plugin *p = ctx;
+    struct view *view = surface;
     struct frame *held;
 
+    /* the texture first: afterwards the engine fetches none of its frames, so none is bound after the library freed
+     * the EGLImages; a frame the engine still shows keeps its texture (an EGLImage's siblings outlive the image) */
     texture_destroy(view->texture);
     view->texture = NULL;
-    held = ucfl_pacer_take_held(&view->pacer);
-    if (held)
+    while ((held = ucfl_pacer_take_held(&view->pacer)))
         release_unshown(view, held);
-    p->lib.destroy(view->wv);
+    ucfl_views_remove(&p->views, view->id);
     view->wv = NULL;
     view_unref(view);
 }
 
-static void handle_stats(struct plugin *p, struct ucfl_writer *w)
+/* ---- platform thread: the GLib loop and the stats (struct ucfl_host_ops) ----------- */
+
+static int prepare_init(void *ctx, char *reason, size_t reason_size)
 {
+    struct plugin *p = ctx;
+
+    if (!p->glib)
+        p->glib = ucfp_glib_loop_new(flutterpi_sd_event_add_io, flutterpi_post_platform_task, reason, reason_size);
+    return p->glib ? 0 : -1;
+}
+
+static void after_call(void *ctx)
+{
+    struct plugin *p = ctx;
+
+    /* the library may have attached sources from this thread, which does not wake the context */
+    ucfp_glib_loop_rearm(p->glib);
+}
+
+static size_t adapter_stats(void *ctx, struct ucfl_stat *out, size_t max)
+{
+    struct plugin *p = ctx;
     struct ucfp_glib_stats glib;
     int64_t now = now_ns(), fps = 0;
     uint64_t gaps = 0;
+    size_t n;
 
     ucfp_glib_loop_get_stats(p->glib, &glib);
     for (size_t i = 0; i < p->views.count; i++) {
@@ -893,7 +816,6 @@ static void handle_stats(struct plugin *p, struct ucfl_writer *w)
         ucfl_delay_take(&p->to_fetch, &view->clock.to_fetch);
     }
     const struct ucfl_stat stats[] = {
-        { "views", (int64_t) p->views.count },
         { "framesReady", (int64_t) p->frames_ready },
         { "framesFetched", (int64_t) p->frames_fetched },
         { "framesReleased", (int64_t) p->frames_released },
@@ -912,99 +834,40 @@ static void handle_stats(struct plugin *p, struct ucfl_writer *w)
         { "glibSlowDispatches", (int64_t) glib.slow_dispatches },
         { "glibEpollRebuilds", (int64_t) glib.epoll_rebuilds },
     };
-    ucfl_put_stats_reply(w, stats, sizeof(stats) / sizeof(stats[0]));
+    n = sizeof(stats) / sizeof(stats[0]) < max ? sizeof(stats) / sizeof(stats[0]) : max;
+    memcpy(out, stats, n * sizeof(stats[0]));
     memset(&p->turnaround, 0, sizeof(p->turnaround));
     memset(&p->to_fetch, 0, sizeof(p->to_fetch));
+    return n;
 }
+
+static const struct ucfl_host_ops host_ops = {
+    .send_event = send_event,
+    .respond = respond,
+    .log = log_line,
+    .prepare_init = prepare_init,
+    .surface_new = surface_new,
+    .surface_frame = surface_frame,
+    .surface_hold = surface_hold,
+    .surface_free = surface_free,
+    .after_call = after_call,
+    .stats = adapter_stats,
+};
+
+/* ---- platform thread: the channels ---------------------------------------- */
 
 static void on_control_message(void *userdata, const FlutterPlatformMessage *message)
 {
     struct plugin *p = userdata;
-    struct ucfl_writer w;
-    struct ucfl_call call;
-    const char *error;
-    struct view *view = NULL;
-    int err;
 
-    ucfl_writer_init(&w);
-    err = ucfl_parse_call(message->message, message->message_size, false, &call, &error);
-    if (err == ENOTSUP) {
-        respond(message, &w); /* empty: not implemented */
-        ucfl_call_clear(&call);
-        return;
-    }
-    if (err) {
-        ucfl_put_error_envelope(&w, err == EINVAL ? "badArguments" : err == EBADMSG ? "badMessage" : "failed", error);
-        respond(message, &w);
-        ucfl_writer_free(&w);
-        return;
-    }
-
-    switch (call.method) {
-    case UCFL_METHOD_TOUCH:
-    case UCFL_METHOD_KEY:
-    case UCFL_METHOD_SET_MAPPED:
-        view = ucfl_views_get(&p->views, call.view_id);
-        break;
-    case UCFL_METHOD_DISPOSE:
-        view = ucfl_views_remove(&p->views, call.view_id);
-        break;
-    default:
-        break;
-    }
-
-    switch (call.method) {
-    case UCFL_METHOD_HELLO:
-        handle_hello(p, &w);
-        break;
-    case UCFL_METHOD_CREATE:
-        handle_create(p, &call, &w);
-        break;
-    case UCFL_METHOD_STATS:
-        handle_stats(p, &w);
-        break;
-    default:
-        if (!view) {
-            ucfl_put_error_envelope(&w, "noView", "unknown viewId");
-            break;
-        }
-        if (call.method == UCFL_METHOD_TOUCH)
-            p->lib.touch(view->wv, call.touch.slot, call.touch.type, call.touch.x, call.touch.y, call.touch.time_ms);
-        else if (call.method == UCFL_METHOD_KEY)
-            p->lib.key(view->wv, call.key.keysym, call.key.keycode, call.key.pressed, 0, 0);
-        else if (call.method == UCFL_METHOD_SET_MAPPED)
-            p->lib.set_mapped(view->wv, call.set_mapped.mapped);
-        else
-            dispose_view(p, view);
-        ucfl_put_null_reply(&w);
-        break;
-    }
-    respond(message, &w);
-    ucfl_writer_free(&w);
-    ucfl_call_clear(&call);
-    /* the library may have attached sources from this thread, which does not wake the context */
-    ucfp_glib_loop_rearm(p->glib);
+    ucfl_host_handle_control(p->host, message->message, message->message_size, (void *) message->response_handle);
 }
 
 static void on_events_message(void *userdata, const FlutterPlatformMessage *message)
 {
     struct plugin *p = userdata;
-    struct ucfl_writer w;
-    struct ucfl_call call;
-    const char *error;
-    int err;
 
-    ucfl_writer_init(&w);
-    err = ucfl_parse_call(message->message, message->message_size, true, &call, &error);
-    if (!err) {
-        p->listening = call.method == UCFL_METHOD_LISTEN;
-        ucfl_put_null_reply(&w);
-    } else if (err != ENOTSUP) {
-        ucfl_put_error_envelope(&w, "badMessage", error);
-    }
-    respond(message, &w);
-    ucfl_writer_free(&w);
-    ucfl_call_clear(&call);
+    ucfl_host_handle_events(p->host, message->message, message->message_size, (void *) message->response_handle);
 }
 
 /* ---- registration ---------------------------------------------------------- */
@@ -1013,6 +876,9 @@ static enum plugin_init_result plugin_init(struct flutterpi *flutterpi, void **u
 {
     struct plugin *p = &plugin_instance;
     struct plugin_registry *registry = flutterpi_get_plugin_registry(flutterpi);
+    const char *library = getenv("UC_WEBVIEW_LIBRARY"); /* a test build of the library; default the installed one */
+    const char *data_dir = getenv("UC_WEBVIEW_DATA_DIR");
+    struct ucfl_host_config config = { 0 };
 
     memset(p, 0, sizeof(*p));
     p->flutterpi = flutterpi;
@@ -1038,11 +904,28 @@ static enum plugin_init_result plugin_init(struct flutterpi *flutterpi, void **u
             (PFNGLEGLIMAGETARGETTEXTURE2DOESPROC) gl_renderer_get_proc_address(p->renderer, "glEGLImageTargetTexture2DOES");
         p->has_bgra = gl_renderer_supports_gl_extension(p->renderer, "GL_EXT_texture_format_BGRA8888");
     }
+    config.library_path = library && *library ? library : UC_WEBVIEW_SONAME;
+    config.egl_display = p->egl_display;
+    config.data_dir = data_dir && *data_dir ? data_dir : NULL;
+    if (!p->renderer)
+        config.unavailable = "flutter-pi renders without OpenGL ES: web views need GL textures";
+    else if (!p->image_target_texture)
+        config.unavailable = "glEGLImageTargetTexture2DOES is missing";
+    p->host = ucfl_host_new(&host_ops, p, &config);
+    if (!p->host) {
+        LOG("out of memory");
+        sd_event_source_unref(p->done_source);
+        close(p->done_fd);
+        return PLUGIN_INIT_RESULT_ERROR;
+    }
+    LOG("%s frame pacing", ucfl_pacing_name(p->pacing));
     start_dumps(p);
 
     if (plugin_registry_set_receiver_v2_locked(registry, UCFL_CHANNEL_CONTROL, on_control_message, p) != 0 ||
         plugin_registry_set_receiver_v2_locked(registry, UCFL_CHANNEL_EVENTS, on_events_message, p) != 0) {
         plugin_registry_remove_receiver_v2_locked(registry, UCFL_CHANNEL_CONTROL);
+        ucfl_host_free(p->host);
+        p->host = NULL;
         stop_dumps(p);
         sd_event_source_unref(p->done_source);
         close(p->done_fd);
@@ -1060,8 +943,9 @@ static void plugin_deinit(struct flutterpi *flutterpi, void *userdata)
 
     plugin_registry_remove_receiver_v2_locked(registry, UCFL_CHANNEL_CONTROL);
     plugin_registry_remove_receiver_v2_locked(registry, UCFL_CHANNEL_EVENTS);
-    while (p->views.count)
-        dispose_view(p, ucfl_views_remove(&p->views, p->views.slots[0].id));
+    /* every view (surface_free, uc_webview_free()); replies that still wait are dropped with the engine */
+    ucfl_host_free(p->host);
+    p->host = NULL;
     ucfl_views_free(&p->views);
 
     ucfp_glib_loop_get_stats(p->glib, &glib);
