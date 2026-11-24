@@ -1,10 +1,5 @@
-tests/test-codec
-tests/test-protocol
-tests/test-loader
-tests/test-views
-tests/test-dump
-tests/test-pacing
-tests/test-glib-loop
-tests/*-asan
-tests/*.so
+# the host test binaries (make check), the fakes of the library and the flutter-pi build (make flutter-pi-build)
+/tests/test-*
+!/tests/test-*.c
+/tests/*.so
 /.cache/
