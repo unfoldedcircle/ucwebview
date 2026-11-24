@@ -79,6 +79,16 @@ struct ucfl_pace ucfl_pacer_fetched(struct ucfl_pacer *pacer, void *frame)
     pacer->pushed = NULL;
     held = pacer->held;
     pacer->held = NULL;
+    if (held && pacer->hold) {
+        /* not to the engine during a hold: it waits as the frozen frame (a newer frozen one wins), reported at once */
+        if (pacer->frozen) {
+            pace.release = held;
+        } else {
+            pacer->frozen = held;
+            pace.rendered = held;
+        }
+        return pace;
+    }
     return held ? push(pacer, held) : pace;
 }
 

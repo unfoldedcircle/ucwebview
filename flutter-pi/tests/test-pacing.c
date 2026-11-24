@@ -335,11 +335,41 @@ static void test_hold_take(void)
     g_assert_null(pacer.frozen);
 }
 
+
+/* AHEAD: a frame that waited for the fetch before the hold began does not reach the engine during the hold */
+static void test_hold_ahead_waiting(void)
+{
+    struct ucfl_pacer pacer;
+    struct ucfl_pace pace;
+
+    ucfl_pacer_init(&pacer, UCFL_PACING_AHEAD);
+    ucfl_pacer_ready(&pacer, F(0));        /* pushed */
+    ucfl_pacer_ready(&pacer, F(1));        /* held */
+    ucfl_pacer_set_hold(&pacer, true);
+    pace = ucfl_pacer_fetched(&pacer, F(0));
+    g_assert_true(!pace.push && pace.rendered == F(1) && !pace.release);
+    g_assert_true(pacer.frozen == F(1));
+    g_assert_null(pacer.held);
+    pace = ucfl_pacer_set_hold(&pacer, false);
+    g_assert_true(pace.push == F(1));
+
+    /* with a newer frozen frame the waiting one is released */
+    ucfl_pacer_init(&pacer, UCFL_PACING_AHEAD);
+    ucfl_pacer_ready(&pacer, F(0));
+    ucfl_pacer_ready(&pacer, F(1));
+    ucfl_pacer_set_hold(&pacer, true);
+    ucfl_pacer_ready(&pacer, F(2));        /* frozen */
+    pace = ucfl_pacer_fetched(&pacer, F(0));
+    g_assert_true(!pace.push && !pace.rendered && pace.release == F(1));
+    g_assert_true(pacer.frozen == F(2));
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
     g_test_add_func("/pacing/hold", test_hold);
     g_test_add_func("/pacing/hold-take", test_hold_take);
+    g_test_add_func("/pacing/hold-ahead-waiting", test_hold_ahead_waiting);
     g_test_add_func("/pacing/parse", test_parse);
     g_test_add_func("/pacing/fetch", test_fetch_mode);
     g_test_add_func("/pacing/ahead", test_ahead_mode);
