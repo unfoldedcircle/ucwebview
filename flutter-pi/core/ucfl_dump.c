@@ -13,6 +13,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <fcntl.h>
 #include <sys/stat.h>
 
 int ucfl_dump_init(struct ucfl_dump *dump, const char *dir)
@@ -79,7 +80,7 @@ int ucfl_write_ppm(const char *path, const void *pixels, int width, int height, 
     char tmp[UCFL_DUMP_PATH_MAX + 8];
     uint8_t *row;
     FILE *file;
-    int err = 0;
+    int fd, err = 0;
 
     if (!path || !pixels || width <= 0 || height <= 0 || stride < (size_t) width * 4)
         return EINVAL;
@@ -88,9 +89,19 @@ int ucfl_write_ppm(const char *path, const void *pixels, int width, int height, 
     row = malloc((size_t) width * 3);
     if (!row)
         return ENOMEM;
-    file = fopen(tmp, "wbe");
+    /* a new file of our own, mode 0600 (frames show page content): a stale .tmp of a crashed run goes first, and a
+     * symbolic link planted in its place is refused rather than followed */
+    if (unlink(tmp) != 0 && errno != ENOENT) {
+        err = errno;
+        free(row);
+        return err;
+    }
+    fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+    file = fd >= 0 ? fdopen(fd, "wb") : NULL;
     if (!file) {
         err = errno;
+        if (fd >= 0)
+            close(fd);
         free(row);
         return err;
     }

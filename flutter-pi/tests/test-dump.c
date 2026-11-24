@@ -109,6 +109,33 @@ static void test_ppm(void)
     remove_dir(dir);
 }
 
+
+/* a stale or planted .tmp is replaced, never followed; the file is the owner's only */
+static void test_ppm_tmp(void)
+{
+    char *dir = make_dir();
+    char *path = g_build_filename(dir, "frame.ppm", NULL);
+    char *tmp = g_build_filename(dir, "frame.ppm.tmp", NULL);
+    char *target = g_build_filename(dir, "target", NULL);
+    char *contents = NULL;
+    struct stat st;
+
+    g_assert_true(g_file_set_contents(target, "keep", -1, NULL));
+    g_assert_cmpint(symlink(target, tmp), ==, 0);
+    g_assert_cmpint(ucfl_write_ppm(path, rgba, 3, 2, 16, UCFL_PIXELS_RGBA, false), ==, 0);
+    check_ppm(path, false);
+    g_assert_true(g_file_get_contents(target, &contents, NULL, NULL));
+    g_assert_cmpstr(contents, ==, "keep");
+    g_assert_cmpint(stat(path, &st), ==, 0);
+    g_assert_cmpint(st.st_mode & 0777, ==, 0600);
+    g_assert_false(exists(dir, "frame.ppm.tmp"));
+    g_free(contents);
+    g_free(target);
+    g_free(tmp);
+    g_free(path);
+    remove_dir(dir);
+}
+
 static void test_ppm_errors(void)
 {
     char *dir = make_dir();
@@ -227,6 +254,7 @@ int main(int argc, char **argv)
     g_test_init(&argc, &argv, NULL);
     g_test_add_func("/dump/ppm", test_ppm);
     g_test_add_func("/dump/ppm-errors", test_ppm_errors);
+    g_test_add_func("/dump/ppm-tmp", test_ppm_tmp);
     g_test_add_func("/dump/off", test_off);
     g_test_add_func("/dump/trigger", test_trigger);
     g_test_add_func("/dump/create-and-stuck-trigger", test_create_and_stuck_trigger);
