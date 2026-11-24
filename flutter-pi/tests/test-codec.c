@@ -327,6 +327,34 @@ static void test_depth_limit(void)
     ucfl_value_clear(&b);
 }
 
+
+/* nested lists that each claim nearly the whole message: refused before they allocate more items than it has bytes */
+static void test_item_budget(void)
+{
+    uint8_t msg[1000] = { 0 };
+    static const uint8_t small[] = { UCFL_LIST, 2, UCFL_LIST, 2, 0, 0, UCFL_LIST, 2, 0, 0 };
+    struct ucfl_value value;
+    size_t pos = 0;
+
+    for (int i = 0; i < 10; i++) {
+        size_t count = sizeof(msg) - pos - 4;
+        msg[pos++] = UCFL_LIST;
+        msg[pos++] = 254;
+        msg[pos++] = (uint8_t) (count & 0xff);
+        msg[pos++] = (uint8_t) (count >> 8);
+    }
+    pos = 0;
+    g_assert_cmpint(ucfl_decode_value(msg, sizeof(msg), &pos, &value), ==, EBADMSG);
+    g_assert_cmpint(value.type, ==, UCFL_NULL);
+
+    /* within the budget: as many items as bytes */
+    pos = 0;
+    g_assert_cmpint(ucfl_decode_value(small, sizeof(small), &pos, &value), ==, 0);
+    g_assert_cmpuint(value.list.count, ==, 2);
+    g_assert_cmpuint(value.list.items[1].list.count, ==, 2);
+    ucfl_value_clear(&value);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -339,5 +367,6 @@ int main(int argc, char **argv)
     g_test_add_func("/codec/truncated", test_truncated);
     g_test_add_func("/codec/malformed", test_malformed);
     g_test_add_func("/codec/depth-limit", test_depth_limit);
+    g_test_add_func("/codec/item-budget", test_item_budget);
     return g_test_run();
 }

@@ -16,6 +16,8 @@ struct reader {
     const uint8_t *msg;
     size_t size;
     size_t pos;
+    size_t budget; /* list and map items still allowed: nested lists cannot make up more items than the message has
+                      bytes, whatever counts they claim before their elements are read */
 };
 
 static bool take(struct reader *r, size_t n, const uint8_t **out)
@@ -129,8 +131,9 @@ static int decode(struct reader *r, struct ucfl_value *out, int depth)
             return EBADMSG;
         /* every value takes at least one byte: refuse counts the rest of the message cannot hold before allocating */
         n = is_map ? count * 2 : count;
-        if (count > r->size - r->pos || (is_map && n > r->size - r->pos))
+        if (count > r->size - r->pos || (is_map && n > r->size - r->pos) || n > r->budget)
             return EBADMSG;
+        r->budget -= n;
         items = n ? calloc(n, sizeof(*items)) : NULL;
         if (n && !items)
             return ENOMEM;
@@ -158,7 +161,7 @@ static int decode(struct reader *r, struct ucfl_value *out, int depth)
 
 int ucfl_decode_value(const uint8_t *msg, size_t size, size_t *pos, struct ucfl_value *out)
 {
-    struct reader r = { msg, size, *pos };
+    struct reader r = { msg, size, *pos, size };
     int err;
 
     if (!msg || *pos > size) {
