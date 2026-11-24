@@ -19,7 +19,8 @@
  *  - a script dialog of a type the protocol does not know is answered "no" at once, and a login of a scheme that takes
  *    no user name (Negotiate, HTML form, server trust, unknown) without credentials, without an event;
  *  - a request that arrives while no one listens on the event channel gets the library's default at once: "no" for
- *    alert, confirm and prompt, "leave" for the leave-page question, no credentials for a login;
+ *    alert, confirm and prompt, "leave" for the leave-page question, no credentials for a login; so do the pending
+ *    requests when the listener cancels, and a request whose event could not be sent;
  *  - before loadUri, loadHtml, reload, goBack and goForward a pending leave-page question is answered "leave", before
  *    stop "stay" (the library would answer "stay" to every navigation call), with a requestCancelled event;
  *  - uc_webview_free() ends a view's requests without a callback, so dispose sends no event for them;
@@ -94,8 +95,9 @@ void ucfl_host_handle_events(struct ucfl_host *host, const uint8_t *msg, size_t 
 /* The loaded library, NULL before it was loaded or when it is unavailable. */
 const struct ucfl_lib *ucfl_host_lib(const struct ucfl_host *host);
 
-/* Sends an event the adapter built (the frame event); counted as dropped while nobody listens. Frees the writer. */
-void ucfl_host_send_event(struct ucfl_host *host, struct ucfl_writer *w);
+/* Sends an event the adapter built (the frame event); counted as dropped while nobody listens. Frees the writer.
+ * false when it was not sent (nobody listens, or the writer ran out of memory). */
+bool ucfl_host_send_event(struct ucfl_host *host, struct ucfl_writer *w);
 
 /* printf-like log line through ops->log */
 void ucfl_host_log(struct ucfl_host *host, const char *fmt, ...) __attribute__((format(printf, 2, 3)));

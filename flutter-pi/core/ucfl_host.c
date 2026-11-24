@@ -65,6 +65,8 @@ struct ucfl_host {
     struct op *ops_pending;
 
     uint64_t events_sent, events_dropped, requests_defaulted;
+    bool page_loaded;     /* a view was asked to load something: WebKit has taken its nominal frame rate */
+    double rate_passed;   /* the refresh rate the library took last, 0 for none */
 };
 
 /* ---- helpers ---------------------------------------------------------------------------------------------------- */
@@ -103,15 +105,18 @@ static void respond_error(struct ucfl_host *host, void *token, const char *code,
     respond(host, token, &w);
 }
 
-void ucfl_host_send_event(struct ucfl_host *host, struct ucfl_writer *w)
+bool ucfl_host_send_event(struct ucfl_host *host, struct ucfl_writer *w)
 {
-    if (host->listening && !w->failed) {
+    bool sent = host->listening && !w->failed;
+
+    if (sent) {
         host->ops.send_event(host->ctx, w->data, w->size);
         host->events_sent++;
     } else {
         host->events_dropped++;
     }
     ucfl_writer_free(w);
+    return sent;
 }
 
 const struct ucfl_lib *ucfl_host_lib(const struct ucfl_host *host)
@@ -165,17 +170,33 @@ static bool ensure_library(struct ucfl_host *host)
     return host->loaded;
 }
 
+/*
+ * The display's refresh rate of initialize or create, for uc_webview_global_set_refresh_rate(): WebKit takes its
+ * nominal frame rate from the library once, when it sets up the display link at the first page load of the process,
+ * and the library takes a rate before and after uc_webview_global_init() (uc_webview.h). So a rate goes to the library
+ * until the first load was asked for, whichever call initialised the library (setCookies and clearData pass none).
+ * After that only setRefreshRate passes one (it changes the library's tick rate at once, not WebKit's nominal rate).
+ */
+static void pass_refresh_rate(struct ucfl_host *host, double refresh_rate)
+{
+    if (!(refresh_rate > 0) || !host->lib.global_set_refresh_rate || host->page_loaded ||
+        refresh_rate == host->rate_passed)
+        return;
+    if (host->lib.global_set_refresh_rate(refresh_rate) == 0)
+        host->rate_passed = refresh_rate;
+    else
+        ucfl_host_log(host, "the library refused the refresh rate %.2f Hz (valid: 20..240)", refresh_rate);
+}
+
 static bool ensure_initialized(struct ucfl_host *host, double refresh_rate)
 {
     if (!ensure_library(host))
         return false;
+    pass_refresh_rate(host, refresh_rate);
     if (host->initialized)
         return true;
     if (host->ops.prepare_init && host->ops.prepare_init(host->ctx, host->reason, sizeof(host->reason)) != 0)
         return false;
-    /* before the first load of the process: WebKit takes its nominal frame rate from it once */
-    if (refresh_rate > 0 && host->lib.global_set_refresh_rate && host->lib.global_set_refresh_rate(refresh_rate) != 0)
-        ucfl_host_log(host, "the library refused the refresh rate %.2f Hz (valid: 20..240)", refresh_rate);
     if (host->lib.global_init(host->egl_display, host->data_dir, NULL) != 0) {
         /* the web view stays unavailable, as remote-ui's WebViewLibrary::ensureInitialized() */
         snprintf(host->reason, sizeof(host->reason), "uc_webview_global_init failed");
@@ -384,6 +405,22 @@ static struct request *take_request(struct ucfl_view *view, int64_t id, uint64_t
     return NULL;
 }
 
+/* Answers a request taken out of the view's list with the library's default and frees it: "no" for a dialog, "leave"
+ * for the leave-page question, no credentials for a login (remote-ui WebViewRequests::answerIfUnhandled()). */
+static void answer_default(struct ucfl_view *view, struct request *request)
+{
+    const struct ucfl_lib *lib = &view->host->lib;
+
+    if (!request)
+        return;
+    if (request->auth)
+        lib->request_auth(view->wv, request->lib_id, NULL, NULL);
+    else
+        lib->request_reply(view->wv, request->lib_id, request->dialog_type == UC_WEBVIEW_DIALOG_BEFORE_UNLOAD, NULL);
+    view->host->requests_defaulted++;
+    free(request);
+}
+
 static void on_script_dialog(uc_webview *wv, uint64_t lib_id, int type, const char *origin, const char *message,
                              const char *default_text, void *user)
 {
@@ -407,7 +444,8 @@ static void on_script_dialog(uc_webview *wv, uint64_t lib_id, int type, const ch
     }
     ucfl_writer_init(&w);
     ucfl_put_event_script_dialog(&w, view->id, request->id, type, origin, message, default_text);
-    ucfl_host_send_event(host, &w);
+    if (!ucfl_host_send_event(host, &w))
+        answer_default(view, take_request(view, request->id, 0)); /* no memory for the event: nobody can answer */
 }
 
 /* remote-ui webviewrequest.cpp isLoginScheme(): the schemes that take a user name and password */
@@ -435,7 +473,8 @@ static void on_authenticate(uc_webview *wv, uint64_t lib_id, const char *origin,
     }
     ucfl_writer_init(&w);
     ucfl_put_event_authenticate(&w, view->id, request->id, origin, realm, scheme, flags);
-    ucfl_host_send_event(host, &w);
+    if (!ucfl_host_send_event(host, &w))
+        answer_default(view, take_request(view, request->id, 0));
 }
 
 static void on_request_cancelled(uc_webview *wv, uint64_t lib_id, void *user)
@@ -626,8 +665,10 @@ static void handle_create(struct ucfl_host *host, const struct ucfl_call *call, 
     ucfl_host_log(host, "view %lld: %dx%d, texture %lld%s%s", (long long) view->id, call->create.width,
                   call->create.height, (long long) texture_id, call->create.url ? ", loads " : "",
                   call->create.url ? origin : "");
-    if (call->create.url && *call->create.url)
+    if (call->create.url && *call->create.url) {
+        host->page_loaded = true;
         host->lib.load_uri(view->wv, call->create.url);
+    }
     ucfl_writer_init(&w);
     ucfl_put_create_reply(&w, view->id, texture_id);
     respond(host, token, &w);
@@ -814,16 +855,19 @@ static void handle_view_call(struct ucfl_host *host, const struct ucfl_call *cal
         break;
     case UCFL_METHOD_LOAD_URI:
         answer_leave_page(view, true);
+        host->page_loaded = true;
         ucfl_log_origin(call->load_uri.uri, origin, sizeof(origin));
         ucfl_host_log(host, "view %lld: load %s", (long long) view->id, origin);
         lib->load_uri(wv, call->load_uri.uri);
         break;
     case UCFL_METHOD_LOAD_HTML:
         answer_leave_page(view, true);
+        host->page_loaded = true;
         lib->load_html(wv, call->load_html.html, call->load_html.base_uri);
         break;
     case UCFL_METHOD_RELOAD:
         answer_leave_page(view, true);
+        host->page_loaded = true;
         lib->reload(wv);
         break;
     case UCFL_METHOD_STOP:
@@ -832,10 +876,12 @@ static void handle_view_call(struct ucfl_host *host, const struct ucfl_call *cal
         break;
     case UCFL_METHOD_GO_BACK:
         answer_leave_page(view, true);
+        host->page_loaded = true;
         lib->go_back(wv);
         break;
     case UCFL_METHOD_GO_FORWARD:
         answer_leave_page(view, true);
+        host->page_loaded = true;
         lib->go_forward(wv);
         break;
     case UCFL_METHOD_GET_STATE: {
@@ -846,8 +892,8 @@ static void handle_view_call(struct ucfl_host *host, const struct ucfl_call *cal
 
         state.can_go_back = lib->can_go_back(wv) != 0;
         state.can_go_forward = lib->can_go_forward(wv) != 0;
-        state.has_magnification = lib->get_magnification != NULL;
-        state.magnification = lib->get_magnification ? lib->get_magnification(wv) : 1.0;
+        state.has_magnification = (lib->features & UCFL_FEATURE_PINCH_ZOOM) != 0;
+        state.magnification = state.has_magnification ? lib->get_magnification(wv) : 1.0;
         state.title = lib->get_title(wv);
         if (library_uri && !uri)
             ucfl_put_error_envelope(w, UCFL_ERROR_FAILED, "out of memory");
@@ -1003,8 +1049,12 @@ static void handle_call(struct ucfl_host *host, const struct ucfl_call *call, vo
                                   host->lib.global_get_refresh_rate ? host->lib.global_get_refresh_rate() : -1);
         break;
     case UCFL_METHOD_SET_REFRESH_RATE:
-        put_result(&w, host->lib.global_set_refresh_rate(call->set_refresh_rate.hz),
-                   "the library refused the refresh rate (valid: 20..240)");
+        if (host->lib.global_set_refresh_rate(call->set_refresh_rate.hz) == 0) {
+            host->rate_passed = call->set_refresh_rate.hz;
+            ucfl_put_null_reply(&w);
+        } else {
+            ucfl_put_error_envelope(&w, UCFL_ERROR_REFUSED, "the library refused the refresh rate (valid: 20..240)");
+        }
         break;
     case UCFL_METHOD_SET_COLOR_SCHEME:
         put_result(&w, host->lib.global_set_color_scheme(call->set_color_scheme.scheme),
@@ -1087,6 +1137,14 @@ void ucfl_host_handle_events(struct ucfl_host *host, const uint8_t *msg, size_t 
         ucfl_put_error_envelope(&w, UCFL_ERROR_BAD_MESSAGE, error);
     } else {
         host->listening = call.method == UCFL_METHOD_LISTEN;
+        /* nobody can answer the pending requests any more: the page would wait forever */
+        if (!host->listening) {
+            for (size_t i = 0; i < host->views.count; i++) {
+                struct ucfl_view *view = host->views.slots[i].data;
+                while (view->requests)
+                    answer_default(view, take_request(view, view->requests->id, 0));
+            }
+        }
         ucfl_put_null_reply(&w);
     }
     ucfl_call_clear(&call);

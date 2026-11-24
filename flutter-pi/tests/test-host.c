@@ -1150,6 +1150,70 @@ static void test_no_secrets_logged(void)
     harness_free(&h);
 }
 
+
+/* the listener goes: pending requests get their defaults at once, the page does not wait forever */
+static void test_cancel_answers_pending(void)
+{
+    struct harness h;
+    uc_webview *wv;
+    void *user;
+    const uc_webview_callbacks *cb;
+    g_autoptr(GBytes) cancel = fixture("call-cancel.bin");
+    g_autoptr(GBytes) stats = NULL;
+    gsize size;
+    const uint8_t *data = g_bytes_get_data(cancel, &size);
+    struct ucfl_value value;
+    int64_t n;
+
+    harness_init(&h);
+    start_listening(&h);
+    create_view(&h);
+    cb = cb_of(&h, 0, &wv, &user);
+    h.fake.add_request(wv, 1);
+    cb->script_dialog(wv, 1, UC_WEBVIEW_DIALOG_ALERT, NULL, "x", NULL, user);
+    h.fake.add_request(wv, 2);
+    cb->script_dialog(wv, 2, UC_WEBVIEW_DIALOG_BEFORE_UNLOAD, NULL, NULL, NULL, user);
+    h.fake.add_request(wv, 3);
+    cb->authenticate(wv, 3, "https://example.com", "Area", UC_WEBVIEW_AUTH_SCHEME_HTTP_BASIC, 0, user);
+    g_ptr_array_set_size(h.events, 0);
+    h.fake.log_clear();
+    ucfl_host_handle_events(h.host, data, size, (void *) (intptr_t) 998);
+    assert_null_reply(&h, 998);
+    /* newest first, each with its default */
+    g_assert_cmpstr(h.fake.log(), ==,
+                    "request_auth 1 3 (null) (null)\nrequest_reply 1 2 1 (null)\nrequest_reply 1 1 0 (null)\n");
+    g_assert_cmpuint(h.events->len, ==, 0);
+    assert_error(&h, send_fixture(&h, "call-reply-dialog.bin"), UCFL_ERROR_NO_REQUEST);
+    stats = take_reply(&h, send_fixture(&h, "call-stats.bin"));
+    decode_reply(stats, &value);
+    g_assert_true(ucfl_value_get_int(ucfl_map_get(&value, "requestsDefaulted"), &n));
+    g_assert_cmpint(n, ==, 3);
+    g_assert_true(ucfl_value_get_int(ucfl_map_get(&value, "pendingRequests"), &n));
+    g_assert_cmpint(n, ==, 0);
+    ucfl_value_clear(&value);
+    harness_free(&h);
+}
+
+/* a refresh rate reaches the library until the first load, whichever call initialised it */
+static void test_refresh_rate_after_init(void)
+{
+    struct harness h;
+    intptr_t token;
+
+    harness_init(&h);
+    token = send_fixture(&h, "call-clear-data.bin"); /* initialises without a rate */
+    h.fake.done(UC_WEBVIEW_DONE_OK);
+    assert_reply(&h, token, "reply-true.bin");
+    h.fake.log_clear();
+    assert_reply(&h, send_fixture(&h, "call-create-full.bin"), "reply-create.bin"); /* 48.61 Hz, loads a URL */
+    g_assert_true(g_str_has_prefix(h.fake.log(), "global_set_refresh_rate 48.61\nnew 1 "));
+    /* after the first load: WebKit has its nominal rate, only setRefreshRate passes one */
+    h.fake.log_clear();
+    assert_reply(&h, send_fixture(&h, "call-initialize.bin"), "reply-initialize.bin");
+    g_assert_cmpstr(h.fake.log(), ==, "");
+    harness_free(&h);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
@@ -1171,6 +1235,8 @@ int main(int argc, char **argv)
     g_test_add_func("/host/bad-messages", test_bad_messages);
     g_test_add_func("/host/dispose-pending", test_dispose_pending);
     g_test_add_func("/host/teardown", test_teardown);
+    g_test_add_func("/host/cancel-answers-pending", test_cancel_answers_pending);
+    g_test_add_func("/host/refresh-rate-after-init", test_refresh_rate_after_init);
     g_test_add_func("/host/no-secrets-logged", test_no_secrets_logged);
     return g_test_run();
 }
