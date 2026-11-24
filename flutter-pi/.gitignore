@@ -1,0 +1,10 @@
+tests/test-codec
+tests/test-protocol
+tests/test-loader
+tests/test-views
+tests/test-dump
+tests/test-pacing
+tests/test-glib-loop
+tests/*-asan
+tests/*.so
+/.cache/
