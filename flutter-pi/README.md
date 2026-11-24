@@ -5,37 +5,48 @@ and drives them over two platform channels. A Flutter app uses only SDK APIs: a 
 and the `Texture` widget. The plugin is C (MIT), built into the flutter-pi binary; the library is `dlopen()`ed at
 run time, so flutter-pi starts and reports "unavailable" on a system without it.
 
-Status: **spike** (protocol 1, a subset). It creates views, shows their frames, forwards touches and keys, maps and
-unmaps, and reports load changes, progress, frame size and web process terminations. Not yet: resize, pointer and
-scroll, text input, dialogs and authentication requests, site settings, device state, pinch zoom.
+What it covers: everything of `uc_webview.h` remote-ui's Qt host uses. Views are created, sized, mapped, focused and
+disposed; pages load, navigate, zoom and run scripts; touch, pointer, scroll, keys and text input reach the page; the
+page's dialogs and logins come as requests the app answers; site settings (request headers, user agent, cookies,
+certificate exceptions, colour scheme, website data) and the device state for web pages are methods; frames show as
+textures, with a frame hold for pinch zoom. The channel protocol is in **[PROTOCOL.md](PROTOCOL.md)**.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `core/` | Host-neutral C, no flutter-pi or GLib types: the dlopen loader with optional symbols (`ucfl_loader`), the view table (`ucfl_views`), Flutter's StandardMessageCodec at byte level (`ucfl_codec`), the channel protocol (`ucfl_protocol`) and the files of the frame dumps (`ucfl_dump`). A later GTK runner plugin for the Linux desktop shares it. |
-| `flutterpi/` | The flutter-pi adapter: registration (`FLUTTERPI_PLUGIN`), channels, frames to textures (`uc_webview_plugin.c`), and GLib's main context on flutter-pi's event loop (`ucfp_glib_loop.c`). |
+| `core/` | Host-neutral C, no flutter-pi or GLib types. `ucfl_host` is the plugin's logic: it loads and initialises the library, keeps the views, turns calls into library calls and callbacks into events, tracks the page's requests and the replies that wait for the library. Below it: the dlopen loader with optional symbols and features (`ucfl_loader`), the view table (`ucfl_views`), Flutter's StandardMessageCodec at byte level (`ucfl_codec`), the protocol's messages (`ucfl_protocol`), frame pacing (`ucfl_pacing`) and frame dump files (`ucfl_dump`). A GTK runner plugin for the Linux desktop can share it. |
+| `flutterpi/` | The flutter-pi adapter: registration (`FLUTTERPI_PLUGIN`), the channels, a texture per view and its frames (`uc_webview_plugin.c`), and GLib's main context on flutter-pi's event loop (`ucfp_glib_loop.c`). |
+| `PROTOCOL.md` | The channel protocol: methods, events, errors, features, versioning, threads, the golden fixtures. |
 | `uc_webview.cmake` | Adds the sources to flutter-pi's `flutterpi_module`; included by flutter-pi's `CMakeLists.txt` when `BUILD_UC_WEBVIEW_PLUGIN` is on. |
 | `patches/` | The patch to flutter-pi that adds that option (default off), made against flutter-pi `8b86c52`. |
-| `tests/` | Host tests (GLib, libsystemd) and the golden byte files of the protocol (`tests/fixtures/`). |
+| `tests/` | Host tests (GLib, libsystemd), a fake `libucwebview.so` (`fake-ucwebview.c`) and the golden byte files of the protocol with their manifest (`tests/fixtures/`). |
 | `scripts/build-flutter-pi.sh` | Builds flutter-pi with the plugin on the host, as a firmware build does. |
 
-## Protocol
+## Protocol in short
 
-Two plain SDK channels, both with `StandardMethodCodec`; the full list is in
-[`core/ucfl_protocol.h`](core/ucfl_protocol.h).
+Two plain SDK channels, both with `StandardMethodCodec` (details, arguments and errors in [PROTOCOL.md](PROTOCOL.md)):
 
-- `uc.webview/control` (`MethodChannel`): `hello`, `create {width, height, url, pixelRatio, refreshRate}` →
-  `{viewId, textureId}`, `touch {viewId, slot, type, x, y, timeMs}`, `key {viewId, keysym, keycode, pressed}`,
-  `setMapped {viewId, mapped}`, `dispose {viewId}`, `stats`. Sizes and positions are device pixels.
-- `uc.webview/events` (`EventChannel`): maps with `type` and `viewId`: `loadChanged`, `progress`, `frame`,
-  `terminated`.
+- `uc.webview/control` (`MethodChannel`):
+  - process: `hello`, `initialize`, `setRefreshRate`, `setColorScheme`, `setTlsErrorsPolicy`, `allowCertificate`,
+    `setCookies`, `clearData`, `stats`;
+  - views: `create` (→ `viewId`, `textureId`), `dispose`, `resize`, `setMapped`, `setFocused`, `setScale`,
+    `setBackgroundColor`, `setFrameHold`;
+  - page: `loadUri`, `loadHtml`, `reload`, `stop`, `goBack`, `goForward`, `getState`, `runJavaScript`, `setZoom`,
+    `setMagnification`, `whenRendered`;
+  - input: `touch`, `pointerButton`, `pointerMove`, `scroll`, `key`, `imeCommit`, `imePreedit`,
+    `imeDeleteSurrounding`;
+  - requests: `replyDialog`, `replyAuth`; site: `setOriginHeaders`, `setUserAgent`; device state: `setDeviceApi`,
+    `setDeviceState`, `deviceEvent`.
+- `uc.webview/events` (`EventChannel`), maps with `type` and `viewId`: `loadChanged`, `loadFailed`, `progress`,
+  `titleChanged`, `historyChanged`, `frame`, `terminated`, `imeFocus`, `imeCursorArea`, `imeSurrounding`,
+  `cursorChanged`, `pinch`, `magnificationChanged`, `scriptDialog`, `authenticate`, `requestCancelled`,
+  `closeRequested`, `newWindow`, `responseRefused`.
 
-`hello` answers `{protocol: 1, available, reason, library, abi, features}`: `available` false with a `reason` when
-flutter-pi renders without OpenGL ES or the library is missing, lacks a function of API version 1 or has another API
-version; `features` names the optional parts of the library found by `dlsym()` (`refreshRate`, `newSized`,
-`whenRendered`, `pinchZoom`, `requests`, `siteSettings`, `deviceApi`, ...). `library` is the library's version string
-once a release exports `uc_webview_library_version()`; up to 0.10.3 it is `null`.
+`hello` answers `{protocol: 1, available, reason, library, abi, features}`; `features` names the optional parts of
+the loaded library (`refreshRate`, `dragThreshold`, `newSized`, `whenRendered`, `pinchZoom`, `requests`,
+`originHeaders`, `userAgent`, `cookies`, `allowCertificate`, `tlsErrorsPolicy`, `colorScheme`, `clearData`,
+`deviceApi`), and a method whose feature is missing replies `unsupported`.
 
 Frames never cross the channels: a view's frames go into the flutter-pi texture whose id `create` returns, shown
 with `Texture(textureId: id)`.
@@ -137,18 +148,49 @@ FLUTTER_PI_CONF_OPTS += -DBUILD_UC_WEBVIEW_PLUGIN=OFF
 endif
 ```
 
-The library (`libucwebview.so.1`) and WPE WebKit are run time dependencies of the system image, not of flutter-pi.
+The library (`libucwebview.so.1`) and WPE WebKit are run time dependencies of the system image, not of flutter-pi:
+the plugin needs only `uc_webview.h` at build time and `dlopen()`s `libucwebview.so.1` on the first call that needs
+it. Use the header of the ucwebview release whose library the image ships, or an older one: the plugin resolves
+every function added after the first release of API version 1 at run time and reports what it found (`hello`'s
+`features`), so a newer library works with an older plugin and the other way round.
+
+The service that runs flutter-pi needs what the library needs in a sandbox: WebKit's JavaScript JIT writes executable
+memory (no systemd `MemoryDenyWriteExecute=`, or `JavaScriptCoreUseJIT=0` in the environment, see
+`uc_webview_global_init()` in `uc_webview.h`), WPE WebKit's helper processes and data (under `/usr/libexec`, `/usr/lib`
+and `/usr/share`) must be readable, and `UC_WEBVIEW_DATA_DIR` writable.
 
 ## Run time
 
 - The plugin looks for `libucwebview.so.1` like `dlopen()` does; `UC_WEBVIEW_LIBRARY=<path>` loads another file.
 - `UC_WEBVIEW_DATA_DIR=<dir>`: website data (cookies, local storage) persist there; without it the session is
   ephemeral. The library's own variables apply as well (`uc_webview_global_init()` in `uc_webview.h`).
-- The refresh rate of the display (`create`'s `refreshRate`, from `FlutterView.display.refreshRate`) is passed to
-  the library before the first page load of the process.
-- Log lines start with `[uc_webview]`; they never contain URLs.
+- The refresh rate of the display (`initialize`'s or the first `create`'s `refreshRate`, from
+  `FlutterView.display.refreshRate`) is passed to the library before the first page load of the process.
+- `UC_WEBVIEW_DRAG_THRESHOLD=<px>` (1..200) is read by the library (0.3.0 and later) and by the plugin for an older
+  library (`initialize`'s `dragThreshold`; 8 px without it).
+- Log lines start with `[uc_webview]`; they carry a URL's origin at most, never its path or query, and never header
+  values, cookie values, passwords or page texts (PROTOCOL.md, "Logging and secrets").
 - `UC_WEBVIEW_DUMP_DIR=<dir>`: frame dumps, see below.
 - `UC_WEBVIEW_FRAME_PACING=fetch|ahead`: see "Frame pacing" above (default `fetch`).
+
+## Stats
+
+The `stats` method returns counters as a map of ints, for tests and diagnostics (a debug overlay, a device check
+script through the app). Names may come and go without a protocol change.
+
+| Name | What |
+|---|---|
+| `views` | views not disposed |
+| `pendingRequests`, `pendingReplies` | page requests waiting for the app's answer; `whenRendered`/`setCookies`/`clearData` replies waiting for the library |
+| `requestsDefaulted` | requests answered with the default because nobody listened on the event channel |
+| `eventsSent`, `eventsDropped` | events sent; events dropped without a listener |
+| `framesReady`, `framesFetched`, `framesReleased`, `framesHeld` | frames from the library; fetched by the engine; given back; that waited ("ahead" pacing) |
+| `pacingAhead` | 1 with `UC_WEBVIEW_FRAME_PACING=ahead` |
+| `fetchMilliFps`, `fetchGaps`, `webTurnaroundAvgUs`/`MaxUs`, `pushToFetchAvgUs`/`MaxUs`, `monotonicMs` | see "Frame pacing" |
+| `glibDispatches`, `glibMaxDispatchUs`, `glibTotalDispatchUs`, `glibSlowDispatches`, `glibEpollRebuilds` | GLib iterations on the platform thread, see "Threads" |
+
+A stuck dialog shows as `pendingRequests` that do not go down, a view the app forgot as `views` that only grow, an
+event listener that went away as `eventsDropped` that rise.
 
 ## Frame dumps
 
@@ -196,12 +238,23 @@ in its writable paths.
 On a Linux host with GLib and libsystemd development files:
 
 ```shell
-make -C flutter-pi check          # codec, protocol, loader (fake libraries), views, dumps, pacing, GLib loop
+make -C flutter-pi check          # codec, protocol, loader, views, dumps, pacing, host core, GLib loop
 make -C flutter-pi check-asan     # the same with AddressSanitizer and UBSan
+make -C flutter-pi fixtures       # regenerates tests/fixtures/ (python3)
 make -C flutter-pi flutter-pi-build FLUTTER_PI_SRC=<flutter-pi checkout at 8b86c52>
 ```
 
+The host core is tested against `tests/fake-ucwebview.c`, a stand-in for `libucwebview.so.1` with every function of
+`uc_webview.h` that logs its calls and lets a test play the library's part (the callbacks of each view, the
+`when_rendered` and done requests, the pending page requests); variants lack the optional functions, a required one,
+part of a feature, or have another API version. `tests/test-host.c` covers availability, initialisation, the view
+lifecycle, every method's library call, every event, the requests and their defaults, the replies that wait for the
+library, missing optional functions, dispose with pending requests and replies, teardown, and that no secret reaches
+the log. flutter-pi itself is not part of the host tests: `flutter-pi-build` compiles the adapter against the pinned
+flutter-pi (CI does both).
+
 The golden byte files in `tests/fixtures/` are the messages as Dart's `StandardMethodCodec` writes and reads them;
 `tests/fixtures/gen-fixtures.py` regenerates them with an independent encoder of the codec's rules. They were checked
-against flutter-pi's own codec (`platch_encode()`/`platch_decode()` of `src/platformchannel.c`). A Dart test of the
-app's channel code is to compare its encoding with the same files (not written yet).
+against flutter-pi's own codec (`platch_encode()`/`platch_decode()` of `src/platformchannel.c`).
+`tests/fixtures/manifest.json` describes each file (PROTOCOL.md, "Golden fixtures") for the contract test of the
+app's channel code, which encodes and decodes the same files with the SDK codec.
