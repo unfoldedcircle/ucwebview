@@ -16,18 +16,21 @@ static int frames[16];
 
 static void test_parse(void)
 {
-    enum ucfl_pacing_mode mode = UCFL_PACING_FETCH;
+    enum ucfl_pacing_mode mode = UCFL_PACING_AHEAD;
 
+    /* "fetch" is the default */
     g_assert_cmpint(ucfl_pacing_parse(NULL, &mode), ==, 0);
-    g_assert_cmpint(mode, ==, UCFL_PACING_AHEAD);
-    g_assert_cmpint(ucfl_pacing_parse("fetch", &mode), ==, 0);
     g_assert_cmpint(mode, ==, UCFL_PACING_FETCH);
-    g_assert_cmpint(ucfl_pacing_parse("", &mode), ==, 0);
-    g_assert_cmpint(mode, ==, UCFL_PACING_AHEAD);
     g_assert_cmpint(ucfl_pacing_parse("ahead", &mode), ==, 0);
     g_assert_cmpint(mode, ==, UCFL_PACING_AHEAD);
+    g_assert_cmpint(ucfl_pacing_parse("", &mode), ==, 0);
+    g_assert_cmpint(mode, ==, UCFL_PACING_FETCH);
+    g_assert_cmpint(ucfl_pacing_parse("ahead", &mode), ==, 0);
+    g_assert_cmpint(ucfl_pacing_parse("fetch", &mode), ==, 0);
+    g_assert_cmpint(mode, ==, UCFL_PACING_FETCH);
+    g_assert_cmpint(ucfl_pacing_parse("ahead", &mode), ==, 0);
     g_assert_cmpint(ucfl_pacing_parse("present", &mode), ==, -1);
-    g_assert_cmpint(mode, ==, UCFL_PACING_AHEAD);
+    g_assert_cmpint(mode, ==, UCFL_PACING_FETCH);
     g_assert_cmpstr(ucfl_pacing_name(UCFL_PACING_FETCH), ==, "fetch");
     g_assert_cmpstr(ucfl_pacing_name(UCFL_PACING_AHEAD), ==, "ahead");
 }
@@ -229,6 +232,37 @@ static void test_clock(void)
     g_assert_cmpuint(clock.n_fetches, ==, UCFL_CLOCK_RING);
     g_assert_cmpint(ucfl_frame_clock_milli_fps(&clock, t), ==, 50000);
     g_assert_cmpint(ucfl_frame_clock_milli_fps(&clock, t + 2 * UCFL_CLOCK_WINDOW), ==, 0);
+
+    /* a nominal rate 3 % above the rate the panel flips at (49.634 Hz nominal, 48.26 Hz real): every interval of a
+     * missed refresh, up to three in a row, is still a gap, and a regular one is not */
+    ucfl_frame_clock_init(&clock, 49.634);
+    const int64_t real = 20721000; /* 48.26 Hz */
+    t = 1000000000;
+    for (int i = 0; i < 100; i++) {
+        t += real;
+        if (i == 20)
+            t += real; /* one refresh missed */
+        if (i == 40)
+            t += 2 * real; /* two */
+        if (i == 60)
+            t += 3 * real; /* three */
+        if (i == 80)
+            t += 5 * real; /* a pause */
+        ucfl_frame_clock_fetched(&clock, t);
+    }
+    g_assert_cmpuint(clock.gaps, ==, 3);
+    /* and 3 % below */
+    ucfl_frame_clock_init(&clock, 48.26 * 0.97);
+    t = 1000000000;
+    for (int i = 0; i < 100; i++) {
+        t += real;
+        if (i == 20)
+            t += real;
+        if (i == 60)
+            t += 3 * real;
+        ucfl_frame_clock_fetched(&clock, t);
+    }
+    g_assert_cmpuint(clock.gaps, ==, 2);
 
     ucfl_frame_clock_init(&clock, 0.0);
     g_assert_cmpint(clock.period_ns, ==, 16666667);

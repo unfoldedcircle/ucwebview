@@ -20,12 +20,12 @@
  *
  * Frame lifecycle (uc_webview.h, "Frame lifecycle"), per frame_ready():
  *   1. pushed as an unresolved texture frame (texture_push_unresolved_frame()); the engine is told a frame is there.
- *      With the default pacing ("ahead", core/ucfl_pacing.h) the push is reported to the library as rendered at once,
- *      and a frame that arrives while the previous push is not fetched yet waits in the view until it is; with
- *      UC_WEBVIEW_FRAME_PACING=fetch every frame is pushed at once and reported when fetched;
+ *      With the default pacing ("fetch", core/ucfl_pacing.h) every frame is pushed at once and reported when
+ *      fetched; with UC_WEBVIEW_FRAME_PACING=ahead the push is reported to the library as rendered at once, and a
+ *      frame that arrives while the previous push is not fetched yet waits in the view until it is;
  *   2. resolve_frame() when the engine fetches it: GL texture from the EGLImage (or glTexImage2D of a shared memory
- *      frame), and a "fetched" note to the platform thread: the waiting frame is pushed ("ahead"), or this one is
- *      reported (uc_webview_frame_rendered(), "fetch");
+ *      frame), and a "fetched" note to the platform thread: this one is reported (uc_webview_frame_rendered(),
+ *      "fetch"), or the waiting frame is pushed ("ahead");
  *   3. dropped (by the engine after the next fetch, or unfetched by flutter-pi) -> "released" note ->
  *      uc_webview_frame_release() and glDeleteTextures() on the platform thread in a context of the plugin's own
  *      (shared with flutter-pi's root context), made current only for that.
@@ -1021,7 +1021,7 @@ static enum plugin_init_result plugin_init(struct flutterpi *flutterpi, void **u
     p->dump_fd = -1;
     ucfl_views_init(&p->views);
     if (ucfl_pacing_parse(getenv("UC_WEBVIEW_FRAME_PACING"), &p->pacing) != 0)
-        LOG("UC_WEBVIEW_FRAME_PACING: unknown value (ahead, fetch): %s pacing", ucfl_pacing_name(p->pacing));
+        LOG("UC_WEBVIEW_FRAME_PACING: unknown value (fetch, ahead): %s pacing", ucfl_pacing_name(p->pacing));
     pthread_mutex_init(&p->done_lock, NULL);
     p->done_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     if (p->done_fd < 0 || flutterpi_sd_event_add_io(&p->done_source, p->done_fd, EPOLLIN, on_done, p) != 0) {

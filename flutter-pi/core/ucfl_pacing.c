@@ -10,11 +10,11 @@
 
 int ucfl_pacing_parse(const char *value, enum ucfl_pacing_mode *mode)
 {
-    *mode = UCFL_PACING_AHEAD;
-    if (!value || !*value || strcmp(value, "ahead") == 0)
+    *mode = UCFL_PACING_FETCH;
+    if (!value || !*value || strcmp(value, "fetch") == 0)
         return 0;
-    if (strcmp(value, "fetch") == 0) {
-        *mode = UCFL_PACING_FETCH;
+    if (strcmp(value, "ahead") == 0) {
+        *mode = UCFL_PACING_AHEAD;
         return 0;
     }
     return -1;
@@ -106,7 +106,8 @@ void ucfl_frame_clock_fetched(struct ucfl_frame_clock *clock, int64_t fetch_ns)
         size_t last = (clock->next + UCFL_CLOCK_RING - 1) % UCFL_CLOCK_RING;
         int64_t interval = fetch_ns - clock->fetch_ns[last];
 
-        if (2 * interval >= 3 * clock->period_ns && interval <= 4 * clock->period_ns)
+        /* 1.5 to 4.5 periods: one to three refreshes missed, with half a period of margin for a nominal rate */
+        if (2 * interval >= 3 * clock->period_ns && 2 * interval <= 9 * clock->period_ns)
             clock->gaps++;
     }
     clock->fetch_ns[clock->next] = fetch_ns;

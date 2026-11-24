@@ -15,10 +15,11 @@
  * frame, before that vblank. So each web frame has from its report until the next vblank to be composited by WebKit,
  * sent, imported by the library and handed to the engine; one that is late leaves a refresh without a new frame.
  *
- *  - UCFL_PACING_FETCH reports a frame when the engine fetches it for a frame, which is shortly after a vblank: the
- *    next web frame has about one refresh period minus the fetch delay. A report after the page flip that shows the
- *    frame would come at the very vblank the next engine frame has to be asked for before, so every web frame would
- *    take two refresh periods: half the panel rate.
+ *  - UCFL_PACING_FETCH (the default) reports a frame when the engine fetches it for a frame, which is shortly after
+ *    a vblank: the next web frame has about one refresh period minus the fetch delay, and a frame that takes longer
+ *    leaves a refresh without a new frame. A report after the page flip that shows the frame would come at the very
+ *    vblank the next engine frame has to be asked for before, so every web frame would take two refresh periods: half
+ *    the panel rate.
  *  - UCFL_PACING_AHEAD reports a frame when it is handed to the engine, so WebKit composites the next frame while
  *    the engine has yet to fetch this one, and holds that next frame until this one was fetched (one frame waits,
  *    never more: WebKit is back-pressured by the frame it waits for). Each web frame has about two refresh periods,
@@ -27,6 +28,10 @@
  *    one refresh period of latency while frames stream (an idle page's first frame goes to the engine at once) and
  *    one more buffer held (three: the one the engine shows, the one handed to it, the one waiting; WebKit's swap
  *    chain has four).
+ *
+ * FETCH is the default: a WebKit turnaround well below a refresh period (a few milliseconds against 16 to 21 ms) gets
+ * every refresh a new frame in both modes, and AHEAD then only adds its refresh period of latency. AHEAD
+ * (UC_WEBVIEW_FRAME_PACING=ahead) is for pages whose turnaround approaches a refresh period or varies around it.
  *
  * Thread: the adapter's platform thread only (no locking).
  */
@@ -38,14 +43,14 @@
 #include <stdint.h>
 
 enum ucfl_pacing_mode {
-    UCFL_PACING_AHEAD = 0, /* the default */
-    UCFL_PACING_FETCH = 1,
+    UCFL_PACING_FETCH = 0, /* the default */
+    UCFL_PACING_AHEAD = 1,
 };
 
-/* The mode named by value ("ahead", "fetch"); NULL or "" is the default. Returns 0, or -1 for another value (mode
+/* The mode named by value ("fetch", "ahead"); NULL or "" is the default. Returns 0, or -1 for another value (mode
  * then is the default). */
 int ucfl_pacing_parse(const char *value, enum ucfl_pacing_mode *mode);
-/* "ahead", "fetch" */
+/* "fetch", "ahead" */
 const char *ucfl_pacing_name(enum ucfl_pacing_mode mode);
 
 /* The pacing state of one view; frames are the adapter's opaque pointers. */
@@ -89,12 +94,14 @@ struct ucfl_frame_clock {
     int64_t period_ns;              /* the display's refresh period, > 0 */
     int64_t fetch_ns[UCFL_CLOCK_RING];
     size_t n_fetches, next;         /* entries used (up to the ring size), next slot to write */
-    uint64_t gaps;                  /* fetch intervals of 1.5 to 4 refresh periods (a refresh without a new frame) */
+    uint64_t gaps;                  /* fetch intervals of 1.5 to 4.5 refresh periods (refreshes without a new frame) */
     struct ucfl_delay turnaround;   /* frame reported rendered -> the next frame delivered (WebKit's response) */
     struct ucfl_delay to_fetch;     /* frame handed to the engine -> fetched */
 };
 
-/* refresh_hz outside (0, 1000] or NaN: 60 Hz. */
+/* refresh_hz outside (0, 1000] or NaN: 60 Hz. The rate may be the display mode's nominal one, which can be a few per
+ * cent off the rate the panel flips at: the gap bounds are half a period away from whole periods, so a rate up to
+ * about 10 % off still counts each missed refresh, and only those. */
 void ucfl_frame_clock_init(struct ucfl_frame_clock *clock, double refresh_hz);
 /* A frame was fetched at fetch_ns (CLOCK_MONOTONIC); calls in time order. */
 void ucfl_frame_clock_fetched(struct ucfl_frame_clock *clock, int64_t fetch_ns);

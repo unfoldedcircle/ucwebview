@@ -70,24 +70,35 @@ refresh after the vblank of the first engine frame that fetches it, and only if 
 a frame, before that vblank. When it is reported decides how long WebKit has for the next one
 ([`core/ucfl_pacing.h`](core/ucfl_pacing.h)):
 
-- `ahead` (the default): a frame is reported when it is handed to the engine, and the next one waits in the plugin
-  until the engine fetched this one. WebKit works one frame ahead and has about two refresh periods per frame, while
-  it still composites exactly one frame per fetch, so a page that draws on every `requestAnimationFrame` stays locked
-  to the display. Costs one refresh period of latency while frames stream and one more buffer (three held: shown,
-  handed over, waiting).
-- `fetch` (`UC_WEBVIEW_FRAME_PACING=fetch`): a frame is reported when the engine fetches it, shortly after a vblank,
-  and the next one is pushed as it arrives. WebKit has one refresh period minus the fetch delay; each frame that takes
-  longer leaves a refresh without a new frame. At most two frames are held.
+- `fetch` (the default): a frame is reported when the engine fetches it, shortly after a vblank, and the next one is
+  pushed as it arrives. WebKit has one refresh period minus the fetch delay; each frame that takes longer leaves a
+  refresh without a new frame. At most two frames are held.
+- `ahead` (`UC_WEBVIEW_FRAME_PACING=ahead`): a frame is reported when it is handed to the engine, and the next one
+  waits in the plugin until the engine fetched this one. WebKit works one frame ahead and has about two refresh
+  periods per frame, while it still composites exactly one frame per fetch, so a page that draws on every
+  `requestAnimationFrame` stays locked to the display. Costs one refresh period of latency while frames stream and one
+  more buffer (three held: shown, handed over, waiting).
+
+The trade-off is latency against tolerance of slow frames. While WebKit's turnaround (`webTurnaroundAvgUs`) stays
+well below a refresh period, both modes get a new frame to every refresh, and `ahead` only adds a refresh period
+between a frame's push and its fetch (`pushToFetchAvgUs`). `ahead` helps a page whose turnaround approaches a refresh
+period or varies around it (`fetchGaps` rising under `fetch`).
 
 A report after the page flip that shows the frame would come at the vblank before which the next engine frame has to
 be asked for, so every web frame would take two refresh periods; flutter-pi has no such signal for plugins anyway.
 
 `stats` reports the pacing next to the counters: `pacingAhead` (1 or 0), `framesHeld` (frames that waited),
 `fetchMilliFps` (the fetch rate over the last second times 1000, each fetched frame being shown at the next page flip),
-`fetchGaps` (fetch intervals of 1.5 to 4 refresh periods: a refresh without a new frame while the page drew),
+`fetchGaps` (fetch intervals of 1.5 to 4.5 refresh periods: one to three refreshes without a new frame while the
+page drew),
 `webTurnaroundAvgUs`/`MaxUs` (report to WebKit's next frame) and `pushToFetchAvgUs`/`MaxUs` (frame handed to the
 engine to fetched), both since the previous `stats` reply and without pauses longer than 250 ms, and `monotonicMs`
 (the time of the reply, for rates between two replies).
+
+The refresh rate the host reports may be the display mode's nominal one, which can be a few per cent above the rate
+the panel really flips at. `fetchMilliFps` is measured, not derived from that rate, so it shows the real rate; the
+`fetchGaps` bounds lie half a period away from whole periods and stay right for a rate about 10 % off. Compare
+`fetchMilliFps` with the rate a page flip test measures, not with the mode's nominal rate.
 
 **Power.** `setMapped(false)` hides the page (`uc_webview_set_mapped()`): no rendering, no frames, no textures to
 draw. Marking a texture frame available makes the engine draw a frame even when the app draws nothing, so an app
@@ -137,7 +148,7 @@ The library (`libucwebview.so.1`) and WPE WebKit are run time dependencies of th
   the library before the first page load of the process.
 - Log lines start with `[uc_webview]`; they never contain URLs.
 - `UC_WEBVIEW_DUMP_DIR=<dir>`: frame dumps, see below.
-- `UC_WEBVIEW_FRAME_PACING=ahead|fetch`: see "Frame pacing" above (default `ahead`).
+- `UC_WEBVIEW_FRAME_PACING=fetch|ahead`: see "Frame pacing" above (default `fetch`).
 
 ## Frame dumps
 
