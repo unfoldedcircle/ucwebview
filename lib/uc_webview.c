@@ -13,6 +13,7 @@
  * cache (or is ephemeral), WebKitSettings come from the environment.
  */
 #include "uc_abi.h"
+#include "uc_cache_model.h"
 #include "uc_device_wk.h"
 #include "uc_ext_protocol.h"
 #include "uc_formats.h"
@@ -450,6 +451,57 @@ setup_extension (void)
     return "web process extension " UC_WEBVIEW_EXTENSION_DIR;
 }
 
+/* WebKit's cache model (uc_cache_model.h): UC_CACHE_MODEL_DEFAULT unless UC_WEBVIEW_CACHE_MODEL picks another. The
+ * model is a process-wide setting (LegacyGlobalSettings); webkit_web_context_set_cache_model() does not use its context
+ * argument (WebKitWebContext.cpp:977-997). It is set before webkit_web_context_get_default() creates the default
+ * context: the process pool's web process cache reads the model once, when the pool is constructed
+ * (WebProcessPool.cpp:261, WebProcessCache.cpp:79, 321-333), while WebProcessPool::setCacheModel() of a later change
+ * updates only the back/forward cache and the processes' memory and disk caches (WebProcessPool.cpp:1743-1751). So
+ * the call passes NULL; uc_webview_global_init() checks the result on the default context afterwards. The library is
+ * the only user of WebKit in its host, and setup_extension() is the first to ask for the default context. */
+static WebKitCacheModel
+webkit_cache_model (UcCacheModel model)
+{
+    switch (model) {
+    case UC_CACHE_MODEL_VIEWER:
+        return WEBKIT_CACHE_MODEL_DOCUMENT_VIEWER;
+    case UC_CACHE_MODEL_WEB_BROWSER:
+        return WEBKIT_CACHE_MODEL_WEB_BROWSER;
+    case UC_CACHE_MODEL_BROWSER:
+    default:
+        return WEBKIT_CACHE_MODEL_DOCUMENT_BROWSER;
+    }
+}
+
+static UcCacheModel
+apply_cache_model (const char **source)
+{
+    const char *env = g_getenv (UC_CACHE_MODEL_ENV);
+    UcCacheModelSource from;
+    UcCacheModel model = uc_cache_model_parse (env, &from);
+
+    if (from == UC_CACHE_MODEL_SOURCE_INVALID)
+        g_warning ("ucwebview: %s=%s ignored, expected viewer, browser or web-browser", UC_CACHE_MODEL_ENV, env);
+    *source = from == UC_CACHE_MODEL_SOURCE_ENV ? UC_CACHE_MODEL_ENV : "default";
+    webkit_web_context_set_cache_model (NULL, webkit_cache_model (model));
+    return model;
+}
+
+/* The model WebKit reports on the default context, as UcCacheModel. */
+static UcCacheModel
+effective_cache_model (void)
+{
+    switch (webkit_web_context_get_cache_model (webkit_web_context_get_default ())) {
+    case WEBKIT_CACHE_MODEL_DOCUMENT_VIEWER:
+        return UC_CACHE_MODEL_VIEWER;
+    case WEBKIT_CACHE_MODEL_WEB_BROWSER:
+        return UC_CACHE_MODEL_WEB_BROWSER;
+    case WEBKIT_CACHE_MODEL_DOCUMENT_BROWSER:
+    default:
+        return UC_CACHE_MODEL_BROWSER;
+    }
+}
+
 /* the views' origin header tables, in creation order, to the web processes */
 static void
 publish_headers (void)
@@ -470,7 +522,8 @@ uc_webview_global_init (void *egl_display, const char *data_dir, const char *cac
 {
     GError *error = NULL;
     UcWpeDisplay *display;
-    const char *pdf_viewer_state, *throttling_state, *extension_state;
+    const char *pdf_viewer_state, *throttling_state, *extension_state, *cache_model_source;
+    UcCacheModel cache_model;
 
     if (global.display != NULL) {
         if (!on_ui_thread (G_STRFUNC))
@@ -541,6 +594,8 @@ uc_webview_global_init (void *egl_display, const char *data_dir, const char *cac
         else
             g_message ("ucwebview: display refresh rate %.3f Hz (%s)", mhz / 1000.0, uc_refresh_source_name (source));
     }
+    /* before anything creates the default WebKitWebContext and its process pool (apply_cache_model()) */
+    cache_model = apply_cache_model (&cache_model_source);
     global.session = create_session (data_dir, cache_dir);
     g_signal_connect (global.session, "download-started", G_CALLBACK (on_download_started), NULL);
     global.pdf_viewer = uc_pdf_policy_viewer_requested ();
@@ -557,6 +612,14 @@ uc_webview_global_init (void *egl_display, const char *data_dir, const char *cac
     apply_tls_policy ();
     apply_color_scheme ();
     extension_state = setup_extension ();
+    if (effective_cache_model () != cache_model) {
+        /* a WebKit that wants the context: the caches follow, the web process cache keeps WebKit's capacity */
+        g_warning ("ucwebview: WebKit did not take the cache model %s before the context existed (it had %s), the web "
+                   "process cache keeps WebKit's default", uc_cache_model_name (cache_model),
+                   uc_cache_model_name (effective_cache_model ()));
+        webkit_web_context_set_cache_model (webkit_web_context_get_default (), webkit_cache_model (cache_model));
+    } else
+        g_message ("ucwebview: WebKit cache model %s (%s)", uc_cache_model_name (cache_model), cache_model_source);
     g_message ("ucwebview %d: WPE WebKit %u.%u.%u, WPEPlatform %u.%u.%u, %s, %s%s%s, %s, %s", UC_WEBVIEW_API_VERSION,
                webkit_get_major_version (), webkit_get_minor_version (), webkit_get_micro_version (),
                wpe_platform_get_major_version (), wpe_platform_get_minor_version (), wpe_platform_get_micro_version (),
