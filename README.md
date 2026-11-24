@@ -39,9 +39,9 @@ are enough for a full build and the runtime tests, see [docs/ci-level-2.md](docs
 
 ```shell
 make                                     # lib/ (library, extension, ucwebview-test) and launcher/; needs WPE WebKit
-make -C lib VERSION=0.10.3 all ucwebview.pc
+make -C lib VERSION=0.10.4 all ucwebview.pc
 make -C lib install DESTDIR=/tmp/stage   # PREFIX=/usr: /usr/lib/libucwebview.so.1, the extension, header, .pc, tool
-make -C launcher VERSION=0.10.3 wpe-launcher
+make -C launcher VERSION=0.10.4 wpe-launcher
 ```
 
 Both directories have plain Makefiles that a firmware or distribution build calls the same way. A cross build passes
@@ -49,8 +49,8 @@ the toolchain on the command line, which overrides the Makefiles' assignments (t
 `ALL_CFLAGS`), for example in a Buildroot generic package:
 
 ```make
-$(TARGET_MAKE_ENV) $(MAKE) $(TARGET_CONFIGURE_OPTS) VERSION=0.10.3 WITH_TEST=1 PREFIX=/usr -C $(@D)/lib all ucwebview.pc
-$(TARGET_MAKE_ENV) $(MAKE) $(TARGET_CONFIGURE_OPTS) VERSION=0.10.3 PREFIX=/usr -C $(@D)/lib DESTDIR=$(TARGET_DIR) install
+$(TARGET_MAKE_ENV) $(MAKE) $(TARGET_CONFIGURE_OPTS) VERSION=0.10.4 WITH_TEST=1 PREFIX=/usr -C $(@D)/lib all ucwebview.pc
+$(TARGET_MAKE_ENV) $(MAKE) $(TARGET_CONFIGURE_OPTS) VERSION=0.10.4 PREFIX=/usr -C $(@D)/lib DESTDIR=$(TARGET_DIR) install
 ```
 
 Variables (command line or environment; the header of each Makefile repeats them):

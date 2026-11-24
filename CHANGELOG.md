@@ -7,6 +7,8 @@ a patch release changes behaviour without a new export or type.
 
 ## Unreleased
 
+## [0.10.4] - 2026-11-24
+
 ### Added
 
 - flutter-pi plugin (`flutter-pi/`): shows the library's web views as flutter-pi textures (DMA-BUF frames zero copy)
@@ -109,5 +111,6 @@ version continues the firmware's library releases. API version 1, 51 exported fu
 - libucwebview: `uc_webview_global_set_cookies()` no longer does pointer arithmetic on a NULL cookie value before
   refusing it (undefined behaviour that clang's UBSan reports; the result was correct). No ABI change.
 
+[0.10.4]: https://github.com/unfoldedcircle/ucwebview/releases/tag/v0.10.4
 [0.10.3]: https://github.com/unfoldedcircle/ucwebview/releases/tag/v0.10.3
 [0.10.2]: https://github.com/unfoldedcircle/ucwebview/releases/tag/v0.10.2
