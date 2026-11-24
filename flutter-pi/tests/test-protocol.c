@@ -580,6 +580,40 @@ static void test_invalid_enums(void)
     g_assert_cmpint(parse_map("setOriginHeaders", NULL, NULL, 0, &error), ==, EINVAL);
     g_assert_cmpint(parse_map("setMagnification", NULL, NULL, 0, &error), ==, EINVAL);
     g_assert_cmpint(parse_map("imeCommit", NULL, NULL, 0, &error), ==, EINVAL);
+    /* a header value that is no string after one that is: the copies so far are freed (ASan) */
+    {
+        struct ucfl_writer w;
+        struct ucfl_call call;
+        ucfl_writer_init(&w);
+        ucfl_put_method_call(&w, "setOriginHeaders");
+        ucfl_put_map(&w, 3);
+        ucfl_put_string(&w, "viewId");
+        ucfl_put_int(&w, 1);
+        ucfl_put_string(&w, "origin");
+        ucfl_put_string(&w, "https://example.com");
+        ucfl_put_string(&w, "headers");
+        ucfl_put_map(&w, 2);
+        ucfl_put_string(&w, "A");
+        ucfl_put_string(&w, "secret");
+        ucfl_put_string(&w, "B");
+        ucfl_put_int(&w, 1);
+        g_assert_cmpint(ucfl_parse_call(w.data, w.size, false, &call, &error), ==, EINVAL);
+        g_assert_nonnull(strstr(error, "headers"));
+        ucfl_writer_free(&w);
+    }
+    /* listen and cancel ignore their arguments, whatever they are */
+    {
+        struct ucfl_writer w;
+        struct ucfl_call call;
+        ucfl_writer_init(&w);
+        ucfl_put_method_call(&w, "listen");
+        ucfl_put_list(&w, 1);
+        ucfl_put_int(&w, 7);
+        g_assert_cmpint(ucfl_parse_call(w.data, w.size, true, &call, &error), ==, 0);
+        g_assert_cmpint(call.method, ==, UCFL_METHOD_LISTEN);
+        ucfl_call_clear(&call);
+        ucfl_writer_free(&w);
+    }
     /* a list where the arguments map belongs */
     {
         struct ucfl_writer w;
@@ -697,6 +731,25 @@ static void test_log_origin(void)
     g_assert_cmpstr(out, ==, "(invalid)");
     ucfl_log_origin(":x", out, sizeof(out));
     g_assert_cmpstr(out, ==, "(invalid)");
+    /* user info with / ? # or a backslash in it: nothing of it is logged */
+    ucfl_log_origin("https://user:pa/ss@host/x", out, sizeof(out));
+    g_assert_cmpstr(out, ==, "(invalid)");
+    ucfl_log_origin("https://user:pa?ss@host/x", out, sizeof(out));
+    g_assert_cmpstr(out, ==, "(invalid)");
+    ucfl_log_origin("https://user:pa#ss@host/x", out, sizeof(out));
+    g_assert_cmpstr(out, ==, "(invalid)");
+    ucfl_log_origin("https://user:pa\\ss@host/x", out, sizeof(out));
+    g_assert_cmpstr(out, ==, "(invalid)");
+    ucfl_log_origin("https://user/ss@host", out, sizeof(out));
+    g_assert_cmpstr(out, ==, "(invalid)");
+    /* an authority that is no host[:port] */
+    ucfl_log_origin("https://us er:x/", out, sizeof(out));
+    g_assert_cmpstr(out, ==, "(invalid)");
+    /* the price: an '@' in a path or query hides the origin too */
+    ucfl_log_origin("https://example.com/?mail=a@b", out, sizeof(out));
+    g_assert_cmpstr(out, ==, "(invalid)");
+    ucfl_log_origin("file:///etc/x", out, sizeof(out));
+    g_assert_cmpstr(out, ==, "file://");
     ucfl_log_origin(NULL, out, sizeof(out));
     g_assert_cmpstr(out, ==, "(none)");
     ucfl_log_origin("https://a-very-long-host-name.example.com/", out, 12);

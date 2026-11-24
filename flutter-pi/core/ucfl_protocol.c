@@ -262,8 +262,9 @@ static int parse_headers(struct ucfl_call *call, const struct ucfl_value *map, c
             return err;
         call->set_origin_headers.names[i] = name;
         call->set_origin_headers.values[i] = value;
+        /* counted at once: ucfl_call_clear() wipes the values copied so far when a later entry fails */
+        call->set_origin_headers.count = i + 1;
     }
-    call->set_origin_headers.count = map->map.count;
     return 0;
 }
 
@@ -480,8 +481,11 @@ int ucfl_parse_call(const uint8_t *msg, size_t size, bool events, struct ucfl_ca
         for (int i = UCFL_METHOD_UNKNOWN + 1; i < UCFL_METHOD_COUNT; i++) {
             if (methods[i].events == events && ucfl_value_is_string(&method, methods[i].name)) {
                 call->method = (enum ucfl_method) i;
-                /* the arguments are a map, or null for a method without any */
-                if (args.type != UCFL_MAP && args.type != UCFL_NULL) {
+                /* the arguments are a map, or null for a method without any; the event channel's listen and cancel
+                 * ignore theirs (EventChannel passes whatever the app gave receiveBroadcastStream()) */
+                if (events) {
+                    err = 0;
+                } else if (args.type != UCFL_MAP && args.type != UCFL_NULL) {
                     *error = "the arguments must be a map";
                     err = EINVAL;
                 } else {
@@ -938,6 +942,38 @@ const char *ucfl_rendered_name(int status)
 
 /* ---- log helper ------------------------------------------------------------------------------------------------- */
 
+/* host[:port] or [v6]:port with the characters RFC 3986 allows there, port digits only */
+static bool valid_authority(const char *a, size_t len)
+{
+    size_t i = 0;
+
+    if (!len)
+        return true; /* file:///path */
+    if (a[0] == '[') {
+        while (i < len && a[i] != ']')
+            i++;
+        if (i == len)
+            return false;
+        i++;
+    } else {
+        for (; i < len && a[i] != ':'; i++) {
+            char c = a[i];
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                  strchr("-._~%!$&'()*+,;=", c)))
+                return false;
+        }
+    }
+    if (i == len)
+        return true;
+    if (a[i++] != ':')
+        return false;
+    for (; i < len; i++) {
+        if (a[i] < '0' || a[i] > '9')
+            return false;
+    }
+    return true;
+}
+
 void ucfl_log_origin(const char *uri, char *out, size_t out_size)
 {
     const char *p, *authority, *end, *at;
@@ -964,11 +1000,19 @@ void ucfl_log_origin(const char *uri, char *out, size_t out_size)
         return;
     }
     authority = p + 3;
-    end = authority + strcspn(authority, "/?#");
+    /* the authority ends at / ? # and, as WebKit's URL parser treats it for http(s), a backslash */
+    end = authority + strcspn(authority, "/?#\\");
     /* user info goes: the last '@' before the end of the authority */
     for (at = end; at > authority && at[-1] != '@'; at--) {
     }
+    /* An '@' after the end means user info that itself holds / ? # or \ ("https://user:pa/ss@host"): where the
+     * authority ends is unclear, and any part of it may be a secret. The same for an authority that is no valid
+     * host[:port] ("user:pa"). Neither is logged. */
     if (at > authority)
         authority = at;
+    if (strchr(end, '@') || !valid_authority(authority, (size_t) (end - authority))) {
+        snprintf(out, out_size, "(invalid)");
+        return;
+    }
     snprintf(out, out_size, "%.*s://%.*s", (int) scheme_len, uri, (int) (end - authority), authority);
 }
