@@ -46,6 +46,14 @@ struct ucfl_pace ucfl_pacer_ready(struct ucfl_pacer *pacer, void *frame)
 {
     struct ucfl_pace pace = { 0 };
 
+    if (pacer->hold) {
+        /* reported at once so WebKit renders on; the newer frame replaces the frozen one */
+        pace.release = pacer->frozen;
+        pacer->frozen = frame;
+        pace.rendered = frame;
+        return pace;
+    }
+
     if (pacer->mode == UCFL_PACING_FETCH || !pacer->pushed)
         return push(pacer, frame); /* FETCH: replaces an unfetched frame, which the texture drops */
     /* WebKit sends no frame before the previous one was reported, and the waiting one is not: a second one would be
@@ -80,14 +88,31 @@ void ucfl_pacer_gone(struct ucfl_pacer *pacer, void *frame)
         pacer->pushed = NULL;
     if (pacer->held == frame)
         pacer->held = NULL;
+    if (pacer->frozen == frame)
+        pacer->frozen = NULL;
+}
+
+struct ucfl_pace ucfl_pacer_set_hold(struct ucfl_pacer *pacer, bool hold)
+{
+    struct ucfl_pace pace = { 0 };
+    void *frozen = pacer->frozen;
+
+    pacer->hold = hold;
+    if (hold || !frozen)
+        return pace;
+    pacer->frozen = NULL;
+    return ucfl_pacer_ready(pacer, frozen);
 }
 
 void *ucfl_pacer_take_held(struct ucfl_pacer *pacer)
 {
-    void *held = pacer->held;
+    void *frame = pacer->held ? pacer->held : pacer->frozen;
 
-    pacer->held = NULL;
-    return held;
+    if (frame == pacer->held)
+        pacer->held = NULL;
+    else
+        pacer->frozen = NULL;
+    return frame;
 }
 
 /* ---- frame clock ------------------------------------------------------------------------------------------------- */

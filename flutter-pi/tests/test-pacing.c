@@ -283,9 +283,63 @@ static void test_clock(void)
     g_assert_cmpint(ucfl_delay_avg_us(&clock.turnaround), ==, 0);
 }
 
+
+/* setFrameHold: no frame reaches the engine while held, each is reported at once, the newest goes on afterwards */
+static void test_hold(void)
+{
+    for (int mode = UCFL_PACING_FETCH; mode <= UCFL_PACING_AHEAD; mode++) {
+        struct ucfl_pacer pacer;
+        struct ucfl_pace pace;
+
+        ucfl_pacer_init(&pacer, (enum ucfl_pacing_mode) mode);
+        pace = ucfl_pacer_ready(&pacer, F(0));
+        g_assert_true(pace.push == F(0));
+        pace = ucfl_pacer_set_hold(&pacer, true);
+        g_assert_true(!pace.push && !pace.rendered && !pace.release);
+
+        pace = ucfl_pacer_ready(&pacer, F(1));
+        g_assert_true(!pace.push && pace.rendered == F(1) && !pace.release);
+        pace = ucfl_pacer_ready(&pacer, F(2));
+        g_assert_true(!pace.push && pace.rendered == F(2) && pace.release == F(1));
+        g_assert_true(pacer.frozen == F(2));
+
+        /* the shown frame is fetched meanwhile: nothing new to push */
+        pace = ucfl_pacer_fetched(&pacer, F(0));
+        g_assert_null(pace.push);
+
+        pace = ucfl_pacer_set_hold(&pacer, false);
+        g_assert_true(pace.push == F(2));
+        g_assert_null(pacer.frozen);
+        /* ending a hold without a frozen frame does nothing */
+        pace = ucfl_pacer_set_hold(&pacer, false);
+        g_assert_true(!pace.push && !pace.rendered && !pace.release);
+    }
+}
+
+/* the view goes during a hold: every waiting frame comes back for release */
+static void test_hold_take(void)
+{
+    struct ucfl_pacer pacer;
+
+    ucfl_pacer_init(&pacer, UCFL_PACING_AHEAD);
+    ucfl_pacer_ready(&pacer, F(0)); /* pushed */
+    ucfl_pacer_ready(&pacer, F(1)); /* held until F(0) is fetched */
+    ucfl_pacer_set_hold(&pacer, true);
+    ucfl_pacer_ready(&pacer, F(2)); /* frozen */
+    g_assert_true(ucfl_pacer_take_held(&pacer) == F(1));
+    g_assert_true(ucfl_pacer_take_held(&pacer) == F(2));
+    g_assert_null(ucfl_pacer_take_held(&pacer));
+    /* a frozen frame that went elsewhere is forgotten */
+    ucfl_pacer_ready(&pacer, F(3));
+    ucfl_pacer_gone(&pacer, F(3));
+    g_assert_null(pacer.frozen);
+}
+
 int main(int argc, char **argv)
 {
     g_test_init(&argc, &argv, NULL);
+    g_test_add_func("/pacing/hold", test_hold);
+    g_test_add_func("/pacing/hold-take", test_hold_take);
     g_test_add_func("/pacing/parse", test_parse);
     g_test_add_func("/pacing/fetch", test_fetch_mode);
     g_test_add_func("/pacing/ahead", test_ahead_mode);

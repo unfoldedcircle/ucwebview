@@ -53,11 +53,21 @@ int ucfl_pacing_parse(const char *value, enum ucfl_pacing_mode *mode);
 /* "fetch", "ahead" */
 const char *ucfl_pacing_name(enum ucfl_pacing_mode mode);
 
-/* The pacing state of one view; frames are the adapter's opaque pointers. */
+/*
+ * The pacing state of one view; frames are the adapter's opaque pointers.
+ *
+ * Frame hold (the protocol's setFrameHold, remote-ui FrameQueue::setHeld()): while a pinch zoom's new magnification
+ * renders, the app shows the current frame scaled; a frame of the new scale must not replace it before the app drops
+ * its scaling. While held, no frame goes to the engine: each new frame is reported rendered at once (WebKit composites
+ * the next frame only after that, and the rendering update the app waits for needs that composite) and waits as
+ * `frozen`, a newer one replacing it; when the hold ends, the frozen frame goes on as if it had just arrived.
+ */
 struct ucfl_pacer {
     enum ucfl_pacing_mode mode;
     void *pushed; /* handed to the engine and not fetched yet, or NULL */
     void *held;   /* UCFL_PACING_AHEAD: waits until `pushed` is fetched, or NULL */
+    bool hold;    /* setFrameHold */
+    void *frozen; /* the newest frame that arrived during the hold, or NULL */
 };
 
 /* What the adapter does next, in this order: release (without showing it), push (hand to the engine), rendered
@@ -75,7 +85,10 @@ struct ucfl_pace ucfl_pacer_ready(struct ucfl_pacer *pacer, void *frame);
 struct ucfl_pace ucfl_pacer_fetched(struct ucfl_pacer *pacer, void *frame);
 /* frame left the adapter: released after the engine dropped it, dropped unfetched, or its push failed. */
 void ucfl_pacer_gone(struct ucfl_pacer *pacer, void *frame);
-/* The waiting frame, which the adapter releases (the view goes away); NULL without one. */
+/* Starts or ends the hold. Ending it hands on the frozen frame (as ucfl_pacer_ready() does). */
+struct ucfl_pace ucfl_pacer_set_hold(struct ucfl_pacer *pacer, bool hold);
+/* A frame that waits (held or frozen), which the adapter releases when the view goes away; NULL when none is left:
+ * call it until it returns NULL. */
 void *ucfl_pacer_take_held(struct ucfl_pacer *pacer);
 
 /* ---- frame clock: the figures of the "stats" reply ---------------------------------------------------------------- */
