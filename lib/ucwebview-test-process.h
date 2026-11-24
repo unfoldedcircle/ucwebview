@@ -14,7 +14,9 @@
  *   back-forward  a new view loads A, then B of the other site (a process swap), goes back to A and forward to B:
  *                 both from the back/forward cache with browser and web-browser, loaded again with viewer;
  *   swap-close    that view is freed: with viewer and browser at most one web process is left, WebKit's spare process
- *                 (prewarmed after the process swap, independent of the cache model, uc_cache_model.h).
+ *                 (prewarmed after the process swap, independent of the cache model, uc_cache_model.h); 0 with WebKit's
+ *                 sandbox on, where the spare belongs to the tool's ephemeral session and ends with its last page
+ *                 (WebProcessPool.cpp:1116-1130, 1462-1495), 1 without the sandbox.
  *
  * The model is the library's, read from UC_WEBVIEW_CACHE_MODEL like the library does. PASS/FAIL per check, INFO lines
  * with the process counts, a summary, exit 0 only when all pass.

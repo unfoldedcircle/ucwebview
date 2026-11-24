@@ -27,8 +27,10 @@ a patch release changes behaviour without a new export or type.
   freed, instead of staying (about 100 MB) for 5 minutes for a later page of the same site on a system with 2 GB of
   RAM or more. Back and forward in a view still come from the back/forward cache (2 pages, as before); WebKit's memory
   cache is smaller (96 instead of 128 MB with 2 GB of RAM) and its disk cache at most 75 MB instead of 1 GB. `UC_WEBVIEW_CACHE_MODEL=viewer|browser|web-browser` selects another
-  model; the start log names it. After a view went to another site, WebKit still keeps one spare web process when the
-  last view is freed: it does not depend on the cache model, and WebKit has no switch for it. No ABI change.
+  model; the start log names it. After a view went to another site, a host with a data directory still keeps one
+  spare web process when the last view is freed (about 53 MB on a Remote with 4 GB of RAM): it does not depend on the
+  cache model, and WebKit's API has no switch for it (lib/README.md names the WebKit change a later release could
+  carry). No ABI change.
 - ucwebview-test: `--process-test` counts the web processes left after the last view is freed and checks back and
   forward across two sites with the library's cache model; the distribution CI runs it with all three models.
 

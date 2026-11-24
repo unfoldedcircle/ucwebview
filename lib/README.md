@@ -1355,8 +1355,23 @@ WebKit's spare web process does not depend on the cache model, and the GLib API 
 navigation that changes the process (another site) WebKit turns automatic prewarming on (`WebProcessPool.cpp:2266-2272`)
 and from then on starts one spare process whenever a main-frame load finishes (`WebPageProxy.cpp:9232-9233`,
 `WebProcessPool.cpp:1533-1546, 1116-1148`). It ends only under memory pressure (`WebProcessPool.cpp:1560-1572`) or,
-with the sandbox on, with an ephemeral session's store (`WebProcessPool.cpp:1462-1495`). So after a view went to
-another site, one web process stays when the last view is freed, also with `browser` (`--process-test`, `swap-close`).
+when the last page of an ephemeral session ends, for a spare launched for that session's store, which WebKit does
+with the bubblewrap sandbox on (`WebProcessPool.cpp:1116-1130, 1462-1495`). So after a view went to another site, a
+host with a data directory (a persistent session) keeps one spare web process when the last view is freed, also with
+`browser`; a host without one (an ephemeral session, like `ucwebview-test`) loses it with the sandbox on and keeps it
+without the sandbox (`--process-test`, `swap-close`: 0 or 1).
+
+Measured on a Remote with 4 GB of RAM (WPE WebKit 2.54.3, a host with a data directory): with `browser` a freed view
+leaves no web process, and WebKit logs `WebProcessCache::canCacheProcess: Not caching process because the cache has no
+capacity`; after a navigation to another site only the spare stays (about 53 MB RSS, still there after 6 min). With
+`web-browser` the closed page's process (about 107 MB RSS) stayed for 4 to 5.5 min. The back/forward cache across sites
+keeps the page's JavaScript state and form values with both models; neither keeps the scroll position.
+
+Possible future enhancement, if memory limits are hit (nothing is planned): ending the spare needs a WebKit change that
+turns automatic process prewarming off, for example `configuration->setIsAutomaticProcessWarmingEnabled(false)` where
+`webkitWebContextConstructed()` builds the process pool configuration (`WebKitWebContext.cpp:439-446`), a candidate for
+[webkit-patches/](../webkit-patches/README.md). WebKit then starts no spare (`WebProcessPool.cpp:1536-1537`), and a
+navigation to another site launches its process when it needs it.
 
 ### Memory with cross-site navigation (known limitation)
 
@@ -1803,7 +1818,9 @@ ucwebview-test --process-test [--process-wait S]
   exactly one with `web-browser` on a system with 2 GB of RAM or more, WebKit's web process cache), `back-forward` (a
   new view shows a, then b of the other site, goes back and forward: both pages from the back/forward cache with
   `browser` and `web-browser`, loaded again with `viewer`), `swap-close` (that view is freed: at most one web process
-  left with `viewer` and `browser`, WebKit's spare process). INFO lines give the counts; the first line names the
+  left with `viewer` and `browser`, WebKit's spare process; 0 where WebKit runs the bubblewrap sandbox, because the
+  tool's session is ephemeral and its store ends the spare, 1 without the sandbox, see "Cache model and web processes
+  (0.10.4)"; a host with a data directory keeps the spare either way). INFO lines give the counts; the first line names the
   model, the RAM and whether the web process cache is on. Output with the default model on a build host:
   `process-test: INFO back-forward: 3 web process(es) with page b (b, a spare, and a's suspended page unless viewer)`,
   `process-test: INFO swap-close: 1 web process(es) 522 ms after uc_webview_free(), pids 6938`, at the end
@@ -2026,7 +2043,7 @@ ucwebview-test --device-test; echo $?                                  # one PAS
 ucwebview-test --load-fail-test --load-fail-tls-cert /tmp/site-test.pem; echo $?   # one PASS line per check, "load-fail-test: 22 passed, 0 failed, 0 skipped: ok", 0 (21 up to 0.10.2)
 ucwebview-test --load-fail-test --load-fail-tls-cert /tmp/site-test.pem --load-fail-steps tls-race; echo $?   # "PASS tls-race: ... 0 unexpected; ... N load(s) repeated after a cancellation", 0 (0.10.3; 0.10.2: FAIL, TIMEOUT details)
 # web processes and the cache model (0.10.4)
-ucwebview-test --process-test; echo $?                                 # "cache model browser, RAM N MiB (web process cache off)", "close: 0 web process(es) ...", back and forward "bfcache", "swap-close: 1 web process(es)" (the spare), "process-test: 7 passed, 0 failed: ok", 0
+ucwebview-test --process-test; echo $?                                 # "cache model browser, RAM N MiB (web process cache off)", "close: 0 web process(es) ...", back and forward "bfcache", "swap-close: 0 web process(es)" with the sandbox (1, the spare, without it), "process-test: 7 passed, 0 failed: ok", 0
 UC_WEBVIEW_CACHE_MODEL=web-browser ucwebview-test --process-test; echo $?   # with 2 GB of RAM or more "web process cache on", "close: 1 web process(es) ...", ok, 0 (0.10.3 behaved like this)
 ucwebview-test http://www.example.invalid/ --frames 1; echo $?          # "load failed: http://www.example.invalid: HOST_NOT_FOUND (g-resolver-error-quark 0, tls 0x0): Error resolving ...", "load FAILED: ...", 1
 journalctl -u <host unit> -b | grep 'load failed'                   # "ucwebview: load failed: <uri>: <message> (<domain> <code>)"
