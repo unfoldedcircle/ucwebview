@@ -4,7 +4,8 @@
 #
 # The whitespace rules of .editorconfig: LF line ends, no trailing white space, a final newline, and no tab
 # characters outside Makefiles (device-host-shim.js is compiled into the web process extension as bytes and must not
-# have any either). webkit-patches/ is skipped: a patch keeps the white space of its context lines.
+# have any either). webkit-patches/ and flutter-pi/patches/ are skipped: a patch keeps the white space of its context
+# lines. *.bin files are binary even when their bytes look like text (the protocol fixtures of flutter-pi/tests/).
 #
 # usage: scripts/check-whitespace.sh   (in a git checkout; checks the tracked and the new, not ignored files)
 set -eu
@@ -14,7 +15,7 @@ status=0
 n=0
 tab=$(printf '\t')
 cr=$(printf '\r')
-for f in $(git ls-files --cached --others --exclude-standard | grep -v '^webkit-patches/'); do
+for f in $(git ls-files --cached --others --exclude-standard | grep -v -e '^webkit-patches/' -e '^flutter-pi/patches/' -e '\.bin$'); do
     [ -f "$f" ] || continue
     # binary files have no rules here
     if ! grep -Iq . "$f" 2>/dev/null && [ -s "$f" ]; then

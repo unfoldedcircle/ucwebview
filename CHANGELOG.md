@@ -7,6 +7,19 @@ a patch release changes behaviour without a new export or type.
 
 ## Unreleased
 
+### Added
+
+- flutter-pi plugin (`flutter-pi/`): shows the library's web views as flutter-pi textures (DMA-BUF frames zero copy)
+  and drives them over two plain platform channels, `uc.webview/control` and `uc.webview/events`, with everything of
+  `uc_webview.h` remote-ui's Qt host uses: views, navigation, zoom and pinch zoom, touch, pointer, keys and text
+  input, the page's dialogs and logins as requests, site settings, the device state for web pages. The protocol is in
+  [flutter-pi/PROTOCOL.md](flutter-pi/PROTOCOL.md), with golden byte files for contract tests. The plugin is built
+  into flutter-pi (a CMake option patch) and `dlopen()`s the library; optional library functions are reported as
+  features. No change to the library.
+  Requests (dialogs, logins) pending when the app stops listening, or whose event could not be sent, are answered
+  with the library's default, so the page never waits for an answer nobody can give; log lines never show parts of
+  the user info of a malformed URL.
+
 ## [0.10.3] - 2026-11-23
 
 ### Fixed

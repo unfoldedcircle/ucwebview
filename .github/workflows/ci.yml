@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Unfolded Circle ApS
 #
-# Level 1 (jobs unit, syntax, lint) runs on GitHub-hosted runners without WPE WebKit: the GLib unit tests, the
-# sanitizer build, a syntax check of every WPE source against the headers of the official WPE WebKit release tarball,
-# and the lints. Level 2 (job distro) builds, installs and runs the library and the launcher against the WPE WebKit
-# of a rolling distribution in a container, see docs/ci-level-2.md. Set the repository variable CI_DISTRO_BUILD to
-# "false" to skip level 2.
+# Level 1 (jobs unit, syntax, flutter-pi, lint) runs on GitHub-hosted runners without WPE WebKit: the GLib unit tests
+# (the flutter-pi plugin's against a fake libucwebview), the sanitizer build, a syntax check of every WPE source
+# against the headers of the official WPE WebKit release tarball, flutter-pi built with the plugin at the pinned
+# commit, and the lints. Level 2 (job distro) builds, installs and runs the library and the launcher against the WPE
+# WebKit of a rolling distribution in a container, see docs/ci-level-2.md. Set the repository variable CI_DISTRO_BUILD
+# to "false" to skip level 2.
 name: CI
 
 on:
@@ -47,7 +48,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential clang libclang-rt-dev pkgconf libglib2.0-dev \
-            libegl-dev dbus
+            libegl-dev dbus libsystemd-dev
           command -v node || sudo apt-get install -y --no-install-recommends nodejs
 
       - name: lib unit tests
@@ -63,6 +64,16 @@ jobs:
 
       - name: lib unit tests with ASan and UBSan
         run: make -C lib check-asan
+
+      - name: flutter-pi plugin unit tests
+        run: make -C flutter-pi check
+
+      - name: flutter-pi plugin unit tests with ASan and UBSan
+        run: make -C flutter-pi check-asan
+
+      - name: flutter-pi plugin protocol fixtures match their generator
+        if: matrix.cc == 'gcc'
+        run: make -C flutter-pi check-fixtures
 
   syntax:
     name: Syntax check against WPE WebKit headers
@@ -99,6 +110,33 @@ jobs:
 
       - name: launcher syntax check
         run: make -C launcher syntax-check WPE_HOST_INCLUDE="$PWD/.cache/wpe-host-include-$WPE_VERSION"
+
+  flutter-pi:
+    name: flutter-pi with the plugin
+    runs-on: ubuntu-24.04
+    env:
+      # the flutter-pi commit the plugin is built and tested against (its internal headers are no stable API)
+      FLUTTER_PI_COMMIT: 8b86c52a004ec2ca7f98a65e5079219679002c61
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake pkgconf libdrm-dev libgbm-dev \
+            libsystemd-dev libinput-dev libxkbcommon-dev libudev-dev libegl-dev libgles-dev libglib2.0-dev
+
+      - name: Fetch flutter-pi
+        run: |
+          git init -q .cache/flutter-pi-src
+          git -C .cache/flutter-pi-src fetch -q --depth 1 https://github.com/ardera/flutter-pi.git "$FLUTTER_PI_COMMIT"
+          git -C .cache/flutter-pi-src checkout -q FETCH_HEAD
+
+      - name: Build flutter-pi with the plugin (Debug, -Werror)
+        run: make -C flutter-pi flutter-pi-build FLUTTER_PI_SRC="$PWD/.cache/flutter-pi-src"
 
   lint:
     name: Lint (SPDX headers, white space, shellcheck)

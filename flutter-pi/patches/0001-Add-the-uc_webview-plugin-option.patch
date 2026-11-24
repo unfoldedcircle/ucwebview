@@ -1,0 +1,42 @@
+From 024a9b276edfb09234d5472793a0543fa0090c8e Mon Sep 17 00:00:00 2001
+From: Markus Zehnder <markus.z@unfoldedcircle.com>
+Date: Mon, 23 Nov 2026 21:38:00 +0100
+Subject: [PATCH] Add the uc_webview plugin option
+
+BUILD_UC_WEBVIEW_PLUGIN (default OFF) includes src/plugins/uc_webview/uc_webview.cmake, which adds the plugin's
+sources to flutterpi_module and links GLib. The plugin's sources are not part of flutter-pi: they are the
+flutter-pi directory of the ucwebview repository, copied to src/plugins/uc_webview before the build, so the
+patch stays the same when the plugin's file list changes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CMakeLists.txt | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 9fedf93..90da8af 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -39,6 +39,7 @@ option(TRY_BUILD_GSTREAMER_AUDIO_PLAYER_PLUGIN "Don't throw an error if the gstr
+ option(BUILD_SENTRY_PLUGIN "Include the sentry plugin in the finished binary. Allows for crash reporting to sentry.io." OFF)
+ 
+ option(BUILD_CHARSET_CONVERTER_PLUGIN "Include the charset converter plugin in the finished binary." OFF)
++option(BUILD_UC_WEBVIEW_PLUGIN "Include the uc_webview plugin (web views of libucwebview as textures) from src/plugins/uc_webview, a copy of the flutter-pi directory of the ucwebview repository. Needs GLib and EGL/OpenGL ES." OFF)
+ option(ENABLE_OPENGL "Build with EGL/OpenGL rendering support." ON)
+ option(TRY_ENABLE_OPENGL "Don't throw an error if EGL/OpenGL aren't found, instead just build without EGL/OpenGL support in that case." ON)
+ option(ENABLE_VULKAN "Build with Vulkan rendering support." OFF)
+@@ -380,6 +381,11 @@ if (BUILD_CHARSET_CONVERTER_PLUGIN)
+   target_sources(flutterpi_module PRIVATE src/plugins/charset_converter.c)
+ endif()
+ 
++if (BUILD_UC_WEBVIEW_PLUGIN)
++  include(${CMAKE_CURRENT_SOURCE_DIR}/src/plugins/uc_webview/uc_webview.cmake)
++endif()
++message(STATUS "uc_webview plugin ...... ${BUILD_UC_WEBVIEW_PLUGIN}")
++
+ # Sentry Plugin
+ set(HAVE_BUNDLED_CRASHPAD_HANDLER OFF)
+ if (BUILD_SENTRY_PLUGIN)
+-- 
+2.47.3
+

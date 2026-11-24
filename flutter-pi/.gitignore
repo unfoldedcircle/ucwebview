@@ -1,0 +1,5 @@
+# the host test binaries (make check), the fakes of the library and the flutter-pi build (make flutter-pi-build)
+/tests/test-*
+!/tests/test-*.c
+/tests/*.so
+/.cache/
