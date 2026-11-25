@@ -41,7 +41,7 @@ integers and `void *` for EGL handles; no GLib/WPE/EGL types. Compiles as C89, C
 
 | Group | Functions |
 |-------|-----------|
-| process | `uc_webview_api_version()`, `uc_webview_global_init(egl_display, data_dir, cache_dir)`, `uc_webview_global_shutdown()`, `uc_webview_global_set_refresh_rate(hz)`, `uc_webview_global_get_refresh_rate()` (library 0.2.0), `uc_webview_global_get_drag_threshold()` (library 0.3.0) |
+| process | `uc_webview_api_version()`, `uc_webview_library_version()` (library 0.11.0), `uc_webview_global_init(egl_display, data_dir, cache_dir)`, `uc_webview_global_shutdown()`, `uc_webview_global_set_refresh_rate(hz)`, `uc_webview_global_get_refresh_rate()` (library 0.2.0), `uc_webview_global_get_drag_threshold()` (library 0.3.0) |
 | lifecycle | `uc_webview_new(w, h, cb, user)`, `uc_webview_new_sized(w, h, cb, cb_size, user)` (library 0.4.0), `uc_webview_free()`, `uc_webview_resize()`, `uc_webview_set_mapped()`, `uc_webview_set_focused()`, `uc_webview_set_scale()` |
 | navigation | `load_uri`, `load_html`, `reload`, `stop`, `go_back`, `go_forward`, `can_go_back`, `can_go_forward`, `get_uri`, `get_title`, `run_javascript`, `set_zoom`, `set_background_rgba` (default opaque white since 0.6.2, black before) |
 | magnification | `uc_webview_set_magnification(scale, x, y)`, `uc_webview_get_magnification()` (library 0.6.0, see "Pinch zoom") |
@@ -84,6 +84,7 @@ new API version would make every host refuse every older library for no gain.
 | 0.8.0 | the seven site setting functions and the host-allocated struct `uc_webview_cookie`; the callback struct does not grow (see "Site settings (0.8.0)"); hosts resolve each function on its own | 48 |
 | 0.9.0 | the three device state functions (see "Device state for web pages (0.9.0)"), resolved one by one like those of 0.8.0 | 51 |
 | 0.10.0 | the callback `load_failed_detail` appended (see "Load failures (0.10.0)") | 51 |
+| 0.11.0 | `uc_webview_library_version()`: the library's version string (the `VERSION` of its build), for the host's logs and bug reports | 52 |
 
 Releases in between change behaviour without a new export or type (for example 0.6.1 switches WebKit's PDF viewer
 off, 0.6.2 makes a new view's background opaque white, WebKit's own default, `WebKitWebViewWPE.cpp:226`).
@@ -1976,7 +1977,9 @@ WebKit's reference is the only extra one and that none is left afterwards, also 
 On a WPE system with the library installed (expected output and exit status in the comments):
 
 ```shell
-ucwebview-test --selftest; echo $?                                     # "selftest ok", 0 (checks the 16 px drag threshold, the 0.6.0 callbacks, the 0.7.0 struct and request functions, the 0.8.0 site settings and the 0.9.0 device state functions without a view)
+ucwebview-test --selftest; echo $?                                     # "selftest ok (API version 1, library <VERSION>)", 0 (checks the 16 px drag threshold, the 0.6.0 callbacks, the 0.7.0 struct and request functions, the 0.8.0 site settings, the 0.9.0 device state functions without a view and, since 0.11.0, that uc_webview_library_version() is the VERSION the tool was built with)
+ucwebview-test --version                                               # "ucwebview-test <VERSION> (API 1), library <VERSION> (API 1)": the tool's build and the library it loaded (0.11.0)
+journalctl -u <host unit> -b | grep 'ucwebview [0-9]'                  # the start line "ucwebview <VERSION> (API 1): WPE WebKit 2.54.x, WPEPlatform 2.54.x, ..." (0.11.0; up to 0.10.x "ucwebview 1: ...")
 ucwebview-test http://localhost/ --frames 10 --out /tmp/f.png; echo $?  # 10 frame lines, PNG shows the page, 0
 ucwebview-test http://localhost/ --resize 400x300,800x480 --frames 4    # frames 2.. carry the new sizes
 ucwebview-test --ime-test; echo $?                                      # ime focus=1 ..., "input value is "ab"", 0
@@ -2036,7 +2039,7 @@ ucwebview-test --data-dir /tmp/site-data --frames 2 http://localhost/ 2>&1 | gre
 nm -D /usr/lib/ucwebview/web-process-extensions/libucwebview-extension.so | grep ' T '   # webkit_web_process_extension_initialize_with_user_data only
 journalctl -u <host unit> -b | grep -c -e 'Bearer' -e '<a configured cookie value>'   # 0: the library logs header names and cookie names, never values
 nm -D /usr/lib/libucwebview.so.1 | grep ' T ' | grep -v ' uc_webview_'  # empty
-nm -D /usr/lib/libucwebview.so.1 | grep -c ' T uc_webview_'               # 51 (0.9.0 and 0.10.0; 48 in 0.8.x)
+nm -D /usr/lib/libucwebview.so.1 | grep -c ' T uc_webview_'               # 52 (0.11.0; 51 in 0.9.0 to 0.10.x, 48 in 0.8.x)
 # device state for web pages (0.9.0)
 ucwebview-test --device-test; echo $?                                  # one PASS line per step, "throttle: N ticks ... while hidden" with N <= 6 (about 30 without the throttling), "device-test: 21 passed, 0 failed: ok", 0
 # load failure reasons (0.10.0); site-test.pem as for --site-test

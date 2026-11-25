@@ -145,7 +145,7 @@ static const GOptionEntry entries[] = {
     { "prevent-touch", 0, 0, G_OPTION_ARG_NONE, &opt_prevent_touch,
       "With --pinch: the page's touch listeners call preventDefault() like a map; the library must not pinch", NULL },
     { "verbose", 'v', 0, G_OPTION_ARG_NONE, &opt_verbose, "Debug output", NULL },
-    { "version", 0, 0, G_OPTION_ARG_NONE, &opt_version, "Print the version and exit", NULL },
+    { "version", 0, 0, G_OPTION_ARG_NONE, &opt_version, "Print the tool and library versions and exit", NULL },
     { NULL }
 };
 
@@ -1278,6 +1278,9 @@ selftest (void)
 #define CHECK(cond) do { if (!(cond)) { g_printerr ("selftest FAILED: %s\n", #cond); failures++; } } while (0)
 
     CHECK (uc_webview_api_version () == UC_WEBVIEW_API_VERSION);
+    /* library 0.11.0: the VERSION of the build, which builds this tool with the library; a string in static storage */
+    CHECK (g_strcmp0 (uc_webview_library_version (), UC_WEBVIEW_VERSION) == 0);
+    CHECK (uc_webview_library_version () == uc_webview_library_version ());
     /* before global_init: every call is a no-op or returns NULL/0, nothing crashes */
     CHECK (uc_webview_new (100, 100, &cb, NULL) == NULL);
     CHECK (uc_webview_new_sized (100, 100, &cb, sizeof cb, NULL) == NULL);
@@ -1378,7 +1381,8 @@ selftest (void)
     CHECK (uc_webview_set_device_state (NULL, "{}") == -1);
     CHECK (uc_webview_device_event (NULL, "suspend", 0) == -1);
 #undef CHECK
-    g_print ("selftest %s (API version %d, library %s)\n", failures == 0 ? "ok" : "FAILED", uc_webview_api_version (), UC_WEBVIEW_VERSION);
+    g_print ("selftest %s (API version %d, library %s)\n", failures == 0 ? "ok" : "FAILED", uc_webview_api_version (),
+             uc_webview_library_version ());
     return failures == 0 ? 0 : 1;
 }
 
@@ -1448,7 +1452,9 @@ main (int argc, char **argv)
         return 3;
     }
     if (opt_version) {
-        g_print ("ucwebview-test %s (API %d)\n", UC_WEBVIEW_VERSION, UC_WEBVIEW_API_VERSION);
+        /* the tool's build and the library loaded at run time (uc_webview_library_version(): library 0.11.0) */
+        g_print ("ucwebview-test %s (API %d), library %s (API %d)\n", UC_WEBVIEW_VERSION, UC_WEBVIEW_API_VERSION,
+                 uc_webview_library_version (), uc_webview_api_version ());
         return 0;
     }
     if (opt_selftest)

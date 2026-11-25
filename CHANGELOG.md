@@ -7,6 +7,17 @@ a patch release changes behaviour without a new export or type.
 
 ## Unreleased
 
+### Added
+
+- libucwebview: `uc_webview_library_version()` returns the library's version, the `VERSION` it was built with
+  (`"0.11.0"`, `"0.0.0-dev"` for a build without one), from any thread and before `uc_webview_global_init()`. A new
+  export within API version 1 (52 instead of 51): hosts resolve it with `dlsym()`, an older library has none. The
+  flutter-pi plugin's `hello` reply carries it as `library` (it was always `null`). The library's start line names the
+  version: `ucwebview 0.11.0 (API 1): WPE WebKit ...` instead of `ucwebview 1: WPE WebKit ...`.
+- ucwebview-test: `--version` prints the version of the library it loaded next to its own
+  (`ucwebview-test 0.11.0 (API 1), library 0.11.0 (API 1)`), and `--selftest` checks that the library reports the
+  version the tool was built with.
+
 ## [0.10.4] - 2026-11-24
 
 ### Added
