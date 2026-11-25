@@ -486,6 +486,17 @@ typedef struct {
 int uc_webview_api_version(void);
 
 /*
+ * Any thread, also before uc_webview_global_init(). Added in library 0.11.0 within API version 1: hosts resolve it
+ * with dlsym(); an older library lacks it and tells no version.
+ *
+ * The version of the loaded library: the VERSION it was built with, for a release its tag without the "v"
+ * ("0.11.0"); "0.0.0-dev" when the build passed none. Static storage, the same pointer at every call, never NULL;
+ * the host must not free it. For logs and bug reports: what the library can do follows from
+ * uc_webview_api_version() and the functions dlsym() finds, not from this string.
+ */
+const char *uc_webview_library_version(void);
+
+/*
  * UI thread, once per process, before the first uc_webview_new(). Creates the
  * in-process WPEDisplay and the shared WebKit network session.
  *   egl_display  the host's EGLDisplay (Qt: nativeResourceForIntegration("egldisplay")); frames are

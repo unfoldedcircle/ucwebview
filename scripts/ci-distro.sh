@@ -75,6 +75,16 @@ run() {
 }
 
 run ucwebview-test --selftest
+# uc_webview_library_version() (library 0.11.0) is the VERSION of the build
+echo "== ucwebview-test --version"
+versions=$(ucwebview-test --version 2>&1) || true
+echo "$versions"
+if [ "$versions" = "ucwebview-test $version (API 1), library $version (API 1)" ]; then
+    echo "== ok: library $version"
+else
+    echo "== FAILED: ucwebview-test --version, expected library $version"
+    status=1
+fi
 page=$(mktemp /tmp/ucwebview-page.XXXXXX.html)
 printf '<html><body style="background:#0080ff"><h1>ucwebview</h1></body></html>\n' > "$page"
 run ucwebview-test --egl none --html "$page" --frames 1 --out /tmp/ucwebview-frame.png --timeout 60

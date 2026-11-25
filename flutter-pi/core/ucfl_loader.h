@@ -82,8 +82,7 @@ struct ucfl_lib {
     UCFL_FN(set_device_api, set_device_api);                             /* 0.9.0 */
     UCFL_FN(set_device_state, set_device_state);                         /* 0.9.0 */
     UCFL_FN(device_event, device_event);                                 /* 0.9.0 */
-    /* Not in any release up to 0.10.3: a version string for the hello reply, if a later release adds it. */
-    const char *(*library_version)(void);
+    const char *(*library_version)(void);                                /* 0.11.0, hello's library */
 
     unsigned features; /* UCFL_FEATURE_* bits found */
 };

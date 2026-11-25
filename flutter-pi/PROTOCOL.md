@@ -56,7 +56,7 @@ treats the web view as unavailable.
 | `protocol` | `int` | the protocol version of the plugin, `1` |
 | `available` | `bool` | web views can be created |
 | `reason` | `String?` | why not, `null` when available (a log text, not for users) |
-| `library` | `String?` | the library's version string; `null` up to libucwebview 0.10.3, which has none |
+| `library` | `String?` | `uc_webview_library_version()` of the loaded library (`"0.11.0"`, for logs); `null` when none was loaded or the library is older than 0.11.0, which has none |
 | `abi` | `int?` | `uc_webview_api_version()` of the loaded library, `null` when none was loaded |
 | `features` | `List<String>` | the optional parts the library has, see below |
 

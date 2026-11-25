@@ -59,7 +59,7 @@ Variables (command line or environment; the header of each Makefile repeats them
 |----------|---------|---------|---------|
 | `CC`, `CFLAGS`, `LDFLAGS` | make's | both | compiler and flags; the Makefiles add their warnings and defines in `ALL_CFLAGS` |
 | `PKG_CONFIG` | `pkg-config` | both | pkg-config to use; a cross build passes its sysroot wrapper |
-| `VERSION` | `0.0.0-dev` | both | the version compiled in (`UC_WEBVIEW_VERSION`, `wpe-launcher --version`) and written to `ucwebview.pc`; release builds pass the tag without its `v` |
+| `VERSION` | `0.0.0-dev` | both | the version compiled in (`uc_webview_library_version()` and `ucwebview-test --version`, `wpe-launcher --version`) and written to `ucwebview.pc`; release builds pass the tag without its `v` |
 | `PREFIX` | `/usr` | both | installation prefix |
 | `libdir`, `includedir`, `bindir` | `$(PREFIX)/lib`, `$(PREFIX)/include`, `$(PREFIX)/bin` | lib (launcher: `bindir`) | installation directories |
 | `DESTDIR` | empty | both | staging root of `make install` |

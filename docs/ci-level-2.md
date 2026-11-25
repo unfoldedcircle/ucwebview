@@ -31,11 +31,12 @@ containers on GitHub's hosted runners:
 1. installs the build and test dependencies from the distribution (`--deps`);
 2. builds the library, its web process extension, `ucwebview-test` and the launcher with the distribution's compiler
    (GCC 16 at the time of the survey) and prints the number of compiler warnings (0);
-3. checks the exports: only `uc_webview_*` from the library (51 functions), only
+3. checks the exports: only `uc_webview_*` from the library (52 functions), only
    `webkit_web_process_extension_initialize_with_user_data` from the extension;
 4. installs everything under `/usr` (the extension directory is compiled into the library) and runs `make check`;
-5. runs `ucwebview-test --selftest`, renders a page in software (shared memory frames, `--egl none`) and runs the
-   self-checking modes `--ime-test`, `--ime-swap-test`, `--dialog-test`, `--auth-test`, `--window-test`,
+5. runs `ucwebview-test --selftest`, checks that `ucwebview-test --version` names the build's `VERSION` for the
+   library (`uc_webview_library_version()`), renders a page in software (shared memory frames, `--egl none`) and
+   runs the self-checking modes `--ime-test`, `--ime-swap-test`, `--dialog-test`, `--auth-test`, `--window-test`,
    `--download-test`, `--device-test`, `--link-test`, `--site-test` (with a self-signed certificate generated for the
    run and a persistent data directory, twice), `--load-fail-test`, `--process-test` (with each of the three
    `UC_WEBVIEW_CACHE_MODEL` values), `--magnify`, `--pinch` (also with `--prevent-touch`) and `--zoom-test`;

@@ -202,6 +202,13 @@ uc_webview_api_version (void)
     return UC_WEBVIEW_API_VERSION;
 }
 
+/* library 0.11.0. UC_WEBVIEW_VERSION is the Makefile's VERSION (-DUC_WEBVIEW_VERSION="..."), a string literal. */
+UC_EXPORT const char *
+uc_webview_library_version (void)
+{
+    return UC_WEBVIEW_VERSION;
+}
+
 /* The rate after the precedence of uc_refresh.h, applied to the display's screen and vsync source. */
 static int
 apply_refresh_rate (UcRefreshSource *source)
@@ -620,7 +627,8 @@ uc_webview_global_init (void *egl_display, const char *data_dir, const char *cac
         webkit_web_context_set_cache_model (webkit_web_context_get_default (), webkit_cache_model (cache_model));
     } else
         g_message ("ucwebview: WebKit cache model %s (%s)", uc_cache_model_name (cache_model), cache_model_source);
-    g_message ("ucwebview %d: WPE WebKit %u.%u.%u, WPEPlatform %u.%u.%u, %s, %s%s%s, %s, %s", UC_WEBVIEW_API_VERSION,
+    g_message ("ucwebview %s (API %d): WPE WebKit %u.%u.%u, WPEPlatform %u.%u.%u, %s, %s%s%s, %s, %s",
+               uc_webview_library_version (), UC_WEBVIEW_API_VERSION,
                webkit_get_major_version (), webkit_get_minor_version (), webkit_get_micro_version (),
                wpe_platform_get_major_version (), wpe_platform_get_minor_version (), wpe_platform_get_micro_version (),
                egl_display != NULL ? "DMA-BUF frames on the host EGLDisplay" : "shared memory frames",

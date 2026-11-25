@@ -32,7 +32,8 @@
 # Variables (command line or environment):
 #   CC, CFLAGS, LDFLAGS   compiler and flags; this file adds its warnings and defines in ALL_CFLAGS
 #   PKG_CONFIG            pkg-config to use (default pkg-config); a cross build passes its sysroot wrapper
-#   VERSION               the library version compiled in (UC_WEBVIEW_VERSION) and written to ucwebview.pc
+#   VERSION               the library version compiled in (UC_WEBVIEW_VERSION, which uc_webview_library_version()
+#                         returns since 0.11.0) and written to ucwebview.pc
 #                         (default 0.0.0-dev; release builds pass the tag without its "v", e.g. VERSION=0.10.4)
 #   WITH_TEST             1 (default): `all` and `install` include ucwebview-test; 0: the library only
 #   PREFIX                installation prefix (default /usr)

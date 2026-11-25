@@ -167,6 +167,7 @@ unsupported (const char *what)
 }
 
 int uc_webview_api_version (void) { return UC_WEBVIEW_API_VERSION; }
+const char *uc_webview_library_version (void) { return UC_WEBVIEW_VERSION; }
 
 /* ---- the same hooks as uc_webview.c ------------------------------------------------------------------------- */
 
@@ -514,7 +515,8 @@ uc_webview_global_init (void *egl_display, const char *data_dir, const char *cac
     apply_color_scheme ();
     setup_extension ();
     global.initialised = TRUE;
-    g_message ("ucwebview %d (WebKitGTK host harness): WebKitGTK %u.%u.%u, %s context, %s%s, %s", UC_WEBVIEW_API_VERSION,
+    g_message ("ucwebview %s (API %d, WebKitGTK host harness): WebKitGTK %u.%u.%u, %s context, %s%s, %s",
+               uc_webview_library_version (), UC_WEBVIEW_API_VERSION,
                webkit_get_major_version (), webkit_get_minor_version (), webkit_get_micro_version (),
                data_dir != NULL ? "persistent" : "ephemeral", global.pdf_viewer ? "PDF viewer on" : "PDF viewer off",
                uc_trace_enabled () ? ", input trace on" : "",
