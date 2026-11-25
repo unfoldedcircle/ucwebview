@@ -13,6 +13,11 @@
 
 #include <glib.h>
 
+/* the loader writes the type of uc_webview_library_version() (library 0.11.0) out (ucfl_loader.h): the header's */
+_Static_assert(__builtin_types_compatible_p(__typeof__(&uc_webview_library_version),
+                                            __typeof__(((struct ucfl_lib *) 0)->library_version)),
+               "ucfl_lib.library_version does not have the type of uc_webview_library_version()");
+
 static void test_missing(void)
 {
     struct ucfl_lib lib;
