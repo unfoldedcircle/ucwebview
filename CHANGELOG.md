@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file. The format is b
 [README](README.md#abi-and-versioning): a minor release adds exports or callbacks within `UC_WEBVIEW_API_VERSION`,
 a patch release changes behaviour without a new export or type.
 
-## Unreleased
+## [0.11.0] - 2026-11-25
 
 ### Added
 
@@ -122,6 +122,7 @@ version continues the firmware's library releases. API version 1, 51 exported fu
 - libucwebview: `uc_webview_global_set_cookies()` no longer does pointer arithmetic on a NULL cookie value before
   refusing it (undefined behaviour that clang's UBSan reports; the result was correct). No ABI change.
 
+[0.11.0]: https://github.com/unfoldedcircle/ucwebview/releases/tag/v0.11.0
 [0.10.4]: https://github.com/unfoldedcircle/ucwebview/releases/tag/v0.10.4
 [0.10.3]: https://github.com/unfoldedcircle/ucwebview/releases/tag/v0.10.3
 [0.10.2]: https://github.com/unfoldedcircle/ucwebview/releases/tag/v0.10.2
